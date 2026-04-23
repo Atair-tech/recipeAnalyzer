@@ -28,9 +28,11 @@ export default function Sidebar({ health, overview, selectedSection, onSelectSec
       <div className="brand-block">
         <div className="brand-mark" aria-hidden="true">
           <div className="brand-mark-frame">
-            <span className="brand-mark-book" />
-            <span className="brand-mark-spoon" />
-            <span className="brand-mark-leaf" />
+            <span className="brand-mark-plate" />
+            <span className="brand-mark-meat" />
+            <span className="brand-mark-egg" />
+            <span className="brand-mark-greens" />
+            <span className="brand-mark-greens brand-mark-greens-right" />
           </div>
         </div>
         <div className="brand-title-group">
