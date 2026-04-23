@@ -1,154 +1,199 @@
 # Recipe Analyzer
 
-本项目现在不是“通用 Excel 导入器”，而是围绕真实菜谱工作簿构建的本地菜谱库。
+本项目是一个围绕真实菜谱工作簿构建的本地菜谱知识库。  
+当前原则：
 
-当前栈：
+- `Excel` 是主数据源
+- `SQLite` 是程序实际使用的本地数据库
+- Web 端以浏览、检索、分析、AI 处理和数据库管理为主
 
-- Frontend: React + Vite
-- Backend: FastAPI
-- Database: SQLite
-- Future desktop shell: Tauri
+## 当前能力
 
-## 当前实现重点
+- 同步 `data/recipes.xlsx` 到本地数据库
+- 按差异同步菜谱数据：`新增 / 更新 / 删除 / 未变化`
+- 浏览菜谱、查看详情、导出筛选结果
+- 按专题库、分组、菜系、结构化食材、自动标签等筛选
+- 菜谱配对审查
+- 结构化食材抽取与 AI 精校
+- 结构化食材审查、单条重跑与人工标记
+- 自动标签体系、批量 AI 打标与标签审核
+- 本地 `Ollama` 智能问答、自然语言搜索、流式阶段展示
+- 数据分析仪表盘
+- 数据库表格浏览、整库导入、整库导出
+- AI 对话日志查看
+- 独立数据库精校工具 `desktop/db_refiner/dist/DataHelper.exe`
 
-- 真实工作簿专用导入器
-  - 支持“索引页 + 做法页”配对
-  - 支持 `甜点配方专区`
-  - 支持 `再挑战及待记录`
-- 差异同步导入
-  - 新增、更新、删除、未变化
-- 真实字段入库
-  - `专题库`
-  - `分组`
-  - `菜系 / 亚菜系`
-  - `食材 / 调料 / 做法及要点`
-  - `BMD / CC`
-  - `来源/修订备注`
-  - `最后记录日期`
-- 浏览器端浏览
-  - 按专题库、分组、菜系、食材筛选
-  - 只读详情页
-  - 导入历史
-  - 数据分析
-  - 自然语言检索与标签建议基础版
+## 技术栈
+
+- 前端：`React + Vite`
+- 后端：`FastAPI`
+- 数据库：`SQLite`
+- 本地模型：`Ollama`
+- 数据处理：`pandas / openpyxl`
 
 ## 目录结构
 
 ```text
-.
-|-- backend/          FastAPI app, SQLite bootstrap, parser, API routes
-|-- desktop/          reserved for a future Tauri shell
-|-- docs/             architecture notes and user manual
-|-- data/             local SQLite database and workbook files
-`-- frontend/         React + Vite browser client
+backend/                 FastAPI 后端
+frontend/                React 前端
+data/                    本地数据库、工作簿、运行时文件
+docs/                    项目文档
+scripts/                 脚本工具
+desktop/db_refiner/      独立数据库精校工具
 ```
 
-## 启动方式
+## 本地启动
 
-### 1. 安装后端依赖
+### 后端
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r .\backend\requirements.txt
+Set-Location .\backend
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-### 2. 启动后端
+开发时可加 `--reload`：
 
 ```powershell
 Set-Location .\backend
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### 3. 安装前端依赖
+### 前端
 
 ```powershell
 Set-Location .\frontend
 npm install
-```
-
-### 4. 启动前端
-
-```powershell
-Set-Location .\frontend
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5173`。
+### 访问地址
 
-## 当前 API
+- 前端：`http://127.0.0.1:5173`
+- 后端：`http://127.0.0.1:8000`
 
-- `GET /api/health`
-- `GET /api/overview`
-- `GET /api/recipes`
-- `GET /api/recipes/filters`
-- `GET /api/recipes/{recipe_id}`
-- `PUT /api/recipes/{recipe_id}` 目前固定返回禁用
-- `POST /api/imports/preview`
-- `POST /api/imports/commit`
-- `GET /api/imports/batches`
-- `GET /api/imports/batches/{batch_id}`
-- `GET /api/analytics/summary`
-- `GET /api/ai/natural-search`
-- `GET /api/ai/recipes/{recipe_id}/tag-suggestions`
+## 主要页面
 
-## 导入说明
+- `总览`
+- `菜谱库`
+- `智能问答`
+- `数据分析`
+- `管理`
+  - `标签管理`
+  - `导入 Excel`
+  - `食材审查`
+  - `菜谱配对`
+  - `查看数据库`
+  - `AI 对话记录`
 
-当前导入器预期的是真实工作簿结构，而不是随意列映射的单表 Excel。
+## 智能问答
 
-已支持的工作表模式：
+当前智能问答支持两条路径：
 
-- `牛肉 / 牛肉做法`
-- `鸡肉 / 鸡肉做法`
-- `海鲜 / 海鲜做法`
-- `猪肉 / 猪肉做法`
-- `羊肉 / 羊肉做法`
-- `鸭肉 / 鸭肉做法`
-- `其他蛋白质 / 其他蛋白质做法`
-- `多种蛋白质及蘸料蘸水 / 多种蛋白质及蘸料蘸水做法`
-- `主食及馅料 / 主食及馅料做法`
-- `素食 / 素食做法`
-- `早餐 / 早餐做法`
-- `甜点配方专区`
-- `再挑战及待记录`
+1. `短句快路径`
+   适用于 `你好 / 谢谢 / 收到 / 好的` 这类短输入，不走完整检索链路。
 
-导入后会把这些信息结构化保存：
+2. `检索增强问答`
+   先做问题解释，再检索候选菜谱，再调用本地模型生成回答。
 
-- 正式菜谱 / 待办项
-- 专题库
-- 分组
-- 菜名与别名
-- 菜系 / 亚菜系
-- 最后记录日期
-- 来源或修订备注
-- BMD / CC 标记
-- 食材
-- 调料
-- 做法及要点
+当前页面支持：
 
-## 当前状态
+- 选择本地模型
+- 可选是否把当前菜谱作为上下文
+- 可选显示推理过程
+- 流式展示阶段状态：
+  - `正在解释问题`
+  - `正在检索菜谱`
+  - `正在生成回答`
 
-已实现：
+## AI 精校
 
-- SQLite 自动初始化与 schema migration
-- 真实工作簿专用解析器
-- 差异同步导入
-- 结构化食材抽取
-- 菜谱库列表与只读详情
-- 导入历史与批次预览
-- 数据分析页
-- 自然语言检索基础版
-- 标签建议基础版
+当前 `导入 Excel` 页面中的 AI 精校，已经调整为：
 
-未实现：
+- **只精校结构化食材**
+- 不再改写：
+  - `ingredients_text`
+  - `seasonings_text`
+  - `steps_text`
+  - `notes_text`
 
-- 回滚到某个导入批次
-- Web 端编辑覆盖层
-- 稳定外部 ID 列的专用导入支持
-- LLM 重排与增量 AI 处理状态
+精校流程支持：
 
-## 下一步建议
+- 启动
+- 暂停
+- 恢复
+- 增量跳过
 
-1. 在 Excel 中补稳定编号列，降低改名时的匹配风险。
-2. 增加 AI 增量状态表，只对新增和变更记录做 AI 处理。
-3. 如果浏览流程稳定，再接入 Tauri 做桌面壳。
+增量判断基于：
 
-更多结构说明见 [docs/architecture.md](docs/architecture.md)。
+- `source_hash`
+- `model`
+- `refine_version`
+
+## 结构化食材审查
+
+`管理 -> 食材审查` 当前支持：
+
+- 查看原始食材文本
+- 查看精校前结构化食材快照
+- 查看精校后结构化食材快照
+- 查看当前结构化食材
+- 标记 `通过 / 有问题`
+- 保存备注
+- 单条重跑精校
+
+注意：
+
+- 精校前后快照只会对新增精校或重跑后的记录开始积累
+- 历史旧记录可能没有快照
+
+## 自动标签
+
+系统维护一套独立于 Excel 的自动标签体系：
+
+- 标签定义保存在数据库自带表中
+- 不受 Excel 同步覆盖影响
+- 可由本地 AI 批量打标签
+- 可在 `标签管理` 中审核标签命中结果并手动移除关联
+
+## 数据库导入导出
+
+`管理 -> 查看数据库` 支持：
+
+- 整库导出
+- 整库导入
+
+说明：
+
+- 导出的是当前 `SQLite` 数据库文件
+- 导入会替换当前数据库内容
+- 导入前建议先备份
+
+## 独立精校工具
+
+项目包含一个独立工具：
+
+- `desktop/db_refiner/dist/DataHelper.exe`
+
+用途：
+
+- 在另一台仅安装了 `Ollama` 和本地模型的电脑上
+- 直接打开导出的数据库文件
+- 对数据库中的菜谱做结构化食材 AI 精校
+- 支持暂停、恢复、增量跳过
+
+说明：
+
+- 它会直接写回你打开的那个数据库文件
+- 不是内存临时结果
+
+## 当前边界
+
+- Excel 仍然是主数据源，不是 Web 端编辑器
+- 本地模型任务可能较慢，尤其是大模型全量精校时
+- 自动标签与食材精校的质量仍依赖提示词、规则和人工审查
+- `qwen3:4b` 这类本地模型在较长上下文下速度会明显下降
+
+## 相关文档
+
+- 用户手册：[docs/user-manual.md](docs/user-manual.md)
+- 下一步规划：[docs/nextsteps0421](docs/nextsteps0421)

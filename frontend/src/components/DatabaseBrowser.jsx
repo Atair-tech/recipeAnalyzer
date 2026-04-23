@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { fetchDatabaseTableRows, fetchDatabaseTables } from "../lib/api";
+import {
+  exportDatabase,
+  fetchDatabaseTableRows,
+  fetchDatabaseTables,
+  importDatabase,
+} from "../lib/api";
 
 const PAGE_SIZE = 50;
 
@@ -20,41 +25,42 @@ export default function DatabaseBrowser() {
   const [tableData, setTableData] = useState(null);
   const [listLoading, setListLoading] = useState(true);
   const [tableLoading, setTableLoading] = useState(false);
+  const [transferLoading, setTransferLoading] = useState(false);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [offset, setOffset] = useState(0);
+
+  async function loadTables() {
+    setListLoading(true);
+    setError("");
+
+    try {
+      const result = await fetchDatabaseTables();
+      setTables(result.items);
+      setSelectedTable((current) => {
+        if (current && result.items.some((item) => item.name === current)) {
+          return current;
+        }
+        return result.items[0]?.name ?? "";
+      });
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setListLoading(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
 
-    async function loadTables() {
-      setListLoading(true);
-      setError("");
-
-      try {
-        const result = await fetchDatabaseTables();
-        if (!active) {
-          return;
-        }
-
-        setTables(result.items);
-        setSelectedTable((current) => {
-          if (current && result.items.some((item) => item.name === current)) {
-            return current;
-          }
-          return result.items[0]?.name ?? "";
-        });
-      } catch (requestError) {
-        if (active) {
-          setError(requestError.message);
-        }
-      } finally {
-        if (active) {
-          setListLoading(false);
-        }
+    async function load() {
+      if (!active) {
+        return;
       }
+      await loadTables();
     }
 
-    loadTables();
+    load();
 
     return () => {
       active = false;
@@ -96,6 +102,52 @@ export default function DatabaseBrowser() {
     };
   }, [selectedTable, offset]);
 
+  async function handleExportDatabase() {
+    setTransferLoading(true);
+    setError("");
+    setSuccessMessage("");
+    try {
+      await exportDatabase();
+      setSuccessMessage("数据库下载已开始。");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setTransferLoading(false);
+    }
+  }
+
+  async function handleImportDatabase(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    const confirmed = window.confirm("导入数据库会替换当前本地数据库，并自动备份旧库。是否继续？");
+    if (!confirmed) {
+      return;
+    }
+
+    setTransferLoading(true);
+    setError("");
+    setSuccessMessage("");
+
+    try {
+      const result = await importDatabase(file);
+      await loadTables();
+      setOffset(0);
+      setSuccessMessage(
+        result.backup_file
+          ? `数据库导入完成，旧库已备份为 ${result.backup_file}。`
+          : "数据库导入完成。"
+      );
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setTransferLoading(false);
+    }
+  }
+
   const totalRows = tableData?.total_rows ?? 0;
   const currentStart = totalRows === 0 ? 0 : offset + 1;
   const currentEnd = Math.min(offset + PAGE_SIZE, totalRows);
@@ -106,12 +158,33 @@ export default function DatabaseBrowser() {
     <section className="panel">
       <div className="panel-header">
         <div>
-          <p className="eyebrow">Database browser</p>
-          <h2>数据库表格浏览</h2>
+          <p className="eyebrow">Database Browser</p>
+          <h2>查看数据库</h2>
+        </div>
+        <div className="action-row">
+          <button
+            type="button"
+            className="action-button secondary"
+            onClick={handleExportDatabase}
+            disabled={transferLoading}
+          >
+            导出数据库
+          </button>
+          <label className={`action-button ${transferLoading ? "disabled-upload" : ""}`}>
+            导入数据库
+            <input
+              type="file"
+              accept=".db,.sqlite,.sqlite3"
+              onChange={handleImportDatabase}
+              disabled={transferLoading}
+              hidden
+            />
+          </label>
         </div>
       </div>
 
       {error ? <div className="error-banner">{error}</div> : null}
+      {successMessage ? <div className="success-banner">{successMessage}</div> : null}
 
       <div className="history-layout database-layout">
         <div className="history-list">

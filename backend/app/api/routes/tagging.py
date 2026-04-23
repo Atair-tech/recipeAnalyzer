@@ -8,7 +8,9 @@ from app.services.managed_tag_service import (
     delete_managed_tag,
     get_tagging_status,
     list_managed_tags,
+    list_managed_tag_recipes,
     pause_tagging_run,
+    remove_managed_tag_assignment,
     resume_tagging_run,
     start_tagging_run,
     update_managed_tag,
@@ -67,6 +69,22 @@ def tagging_delete_tag(tag_id: int):
     if not deleted:
         raise HTTPException(status_code=404, detail="Managed tag not found")
     return {"deleted": True}
+
+
+@router.get("/tagging/tags/{tag_id}/recipes")
+def tagging_tag_recipes(tag_id: int, search: str = "", limit: int = 100):
+    try:
+        return list_managed_tag_recipes(tag_id=tag_id, search=search, limit=limit)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.delete("/tagging/tags/{tag_id}/recipes/{recipe_id}")
+def tagging_delete_tag_recipe(tag_id: int, recipe_id: int):
+    try:
+        return remove_managed_tag_assignment(tag_id=tag_id, recipe_id=recipe_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.get("/tagging/status")

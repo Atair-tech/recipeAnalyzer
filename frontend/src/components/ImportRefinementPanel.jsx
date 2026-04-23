@@ -130,12 +130,8 @@ export default function ImportRefinementPanel() {
       </div>
 
       <div className="warning-banner">
-        这个任务会对当前菜谱的
-        {" "}
-        <code>食材 / 调料 / 结构化食材 / 做法及要点 / 备注</code>
-        {" "}
-        做本地 LLM 精校，并直接更新数据库。增量逻辑基于
-        {" "}
+        当前版本只对结构化食材执行本地 LLM 精校，并直接更新数据库中的{" "}
+        <code>recipe_ingredients</code> 结果。增量逻辑基于{" "}
         <code>source_hash + model + refine_version</code>
         ，未变化记录会自动跳过。
       </div>

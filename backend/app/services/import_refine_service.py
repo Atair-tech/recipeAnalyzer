@@ -1,22 +1,85 @@
 import hashlib
 import json
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from app.db.database import get_connection
 from app.services.ai_log_service import create_ai_conversation_log
-from app.services.ingredient_service import (
-    sync_recipe_ingredients,
-    sync_recipe_ingredients_from_items,
-)
-from app.services.ollama_service import (
-    OLLAMA_DEFAULT_MODEL,
-    _call_ollama_chat as _ollama_chat_impl,
-)
+from app.services.ingredient_service import normalize_ingredient_name, sync_recipe_ingredients_from_items
+from app.services.ollama_service import OLLAMA_DEFAULT_MODEL, _call_ollama_chat as _ollama_chat_impl
 
 
-REFINE_PROMPT_VERSION = "import-refine-v1"
+REFINE_PROMPT_VERSION = "import-refine-v3"
+
+OPTIONAL_PREFIXES = ("可加", "可放", "可用", "也可用", "也可加", "建议加", "最后加")
+OPTIONAL_SUFFIXES = ("可加", "可放", "可用", "也可用", "更好吃", "提味", "增香")
+DROP_HINTS = (
+    "%",
+    "/",
+    "\\",
+    "*",
+    "+",
+    "=",
+    "正常来说",
+    "经典",
+    "低卡",
+    "口味",
+    "含水量",
+    "左右",
+    "以上",
+    "建议",
+    "推荐",
+    "如果",
+    "或者",
+    "然后",
+    "需要",
+    "常用食材",
+    "原版",
+)
+BRAND_PREFIXES = (
+    "六必居",
+    "暴肌独角兽",
+    "薄荷记",
+    "顶丰",
+    "李锦记",
+    "盒马",
+    "牛头牌",
+    "都乐",
+    "和润",
+    "欧萨",
+    "单山",
+    "广合",
+    "圃美多",
+)
+GENERIC_PREFIXES = ("点缀用的", "搭配用的", "佐餐用的", "原版用的", "可选搭配", "搭配蔬菜")
+INGREDIENT_SEGMENTS = (
+    "葡萄叶",
+    "鸡胸肉",
+    "鸡腿肉",
+    "整鸡",
+    "鸡腿",
+    "鸡翅",
+    "鸡块",
+    "薄荷",
+    "欧芹",
+    "莳萝",
+    "海带",
+    "裙带菜",
+    "南瓜",
+    "土豆",
+    "红薯",
+    "茄子",
+    "豆角",
+    "彩椒",
+    "尖椒",
+    "麻椒",
+    "雪菜",
+    "青菜",
+)
+AMOUNT_IN_NAME_PATTERN = re.compile(r"(?P<prefix>.*?)(?P<amount>\d+(?:\.\d+)?)(?P<unit>g|kg|ml|mL|L|l|克|千克|毫升|公升)$", re.I)
+PACKAGE_HINT_PATTERN = re.compile(r"(半包|半袋|一包|一袋|半盒|一盒)$")
 
 _job_lock = threading.Lock()
 _job_state = {
@@ -26,13 +89,8 @@ _job_state = {
 }
 
 
-def _call_ollama_chat(
-    model_name: str,
-    messages: List[Dict[str, str]],
-    max_attempts: int = 2,
-) -> str:
+def _call_ollama_chat(model_name: str, messages: List[Dict[str, str]], max_attempts: int = 2) -> str:
     last_error: Optional[Exception] = None
-
     for attempt in range(1, max_attempts + 1):
         try:
             return _ollama_chat_impl(model_name, messages)
@@ -41,7 +99,6 @@ def _call_ollama_chat(
             if "timed out" not in str(error).lower() or attempt >= max_attempts:
                 raise
             time.sleep(0.5)
-
     if last_error is not None:
         raise last_error
     raise RuntimeError("Ollama call failed without an error")
@@ -177,11 +234,7 @@ def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
             if pause_requested:
                 with get_connection() as connection:
                     connection.execute(
-                        """
-                        UPDATE ai_refine_runs
-                        SET status = 'paused', updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                        """,
+                        "UPDATE ai_refine_runs SET status = 'paused', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (run_id,),
                     )
                     connection.commit()
@@ -210,12 +263,17 @@ def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
                     skipped_count += 1
                 else:
                     snapshot = _load_recipe_snapshot(recipe_id)
-                    refined = _generate_refined_recipe(
-                        snapshot,
-                        model_name,
-                        run_id=run_id,
-                    )
+                    refined = _generate_refined_ingredients(snapshot, model_name, run_id=run_id)
                     with get_connection() as connection:
+                        _store_refine_snapshot(
+                            connection,
+                            recipe_id=recipe_id,
+                            run_id=run_id,
+                            model_name=model_name,
+                            refine_version=refine_version,
+                            before_ingredients=snapshot["ingredients"],
+                            after_ingredients=refined["ingredients"],
+                        )
                         _apply_refined_recipe(connection, recipe_id, refined)
                         connection.execute(
                             """
@@ -264,14 +322,7 @@ def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
                             last_run_id = excluded.last_run_id,
                             last_error = excluded.last_error
                         """,
-                        (
-                            recipe_id,
-                            source_hash,
-                            model_name,
-                            refine_version,
-                            run_id,
-                            str(error),
-                        ),
+                        (recipe_id, source_hash, model_name, refine_version, run_id, str(error)),
                     )
                     connection.commit()
 
@@ -353,22 +404,14 @@ def _load_latest_run(connection) -> Optional[Dict[str, Any]]:
         LIMIT 1
         """
     ).fetchone()
-    if row is None:
-        return None
-    return dict(row)
+    return dict(row) if row is not None else None
 
 
 def _build_refine_version() -> str:
     payload = {
         "version": REFINE_PROMPT_VERSION,
-        "target_fields": [
-            "ingredients_text",
-            "seasonings_text",
-            "steps_text",
-            "notes_text",
-            "ingredients",
-        ],
-        "rule": "preserve meaning, normalize split, do not invent unsupported facts",
+        "target_fields": ["ingredients"],
+        "rule": "keep only ingredient entities, split or mark optional items, never rewrite recipe text fields",
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -398,11 +441,7 @@ def _load_recipe_snapshot(recipe_id: int) -> Dict[str, Any]:
         ).fetchone()
         ingredient_rows = connection.execute(
             """
-            SELECT
-                i.name,
-                ri.amount,
-                ri.unit,
-                ri.remark
+            SELECT i.name, ri.amount, ri.unit, ri.remark
             FROM recipe_ingredients AS ri
             INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
             WHERE ri.recipe_id = ?
@@ -413,7 +452,7 @@ def _load_recipe_snapshot(recipe_id: int) -> Dict[str, Any]:
 
     return {
         "id": recipe_row["id"],
-        "name": recipe_row["name"],
+        "name": recipe_row["name"] or "",
         "library_section": recipe_row["library_section"] or "",
         "section_name": recipe_row["section_name"] or "",
         "cuisine": recipe_row["cuisine"] or "",
@@ -436,53 +475,36 @@ def _load_recipe_snapshot(recipe_id: int) -> Dict[str, Any]:
     }
 
 
-def _generate_refined_recipe(
+def _generate_refined_ingredients(
     recipe: Dict[str, Any],
     model_name: str,
     run_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     prompt = "\n".join(
         [
-            "请根据给定菜谱信息，对已经切分出的字段做精校。",
-            "目标是提高切分质量，不是改写菜谱风格。",
-            "要求：",
-            "1. 不要发明原文没有的信息。",
-            "2. ingredients_text 只放主食材。",
-            "3. seasonings_text 只放调料、酱料、香料。",
-            "4. steps_text 保留做法及要点，尽量整理成清晰文本。",
-            "5. notes_text 只保留备注、补充说明、替换建议等。",
-            "6. ingredients 需要返回结构化食材数组。",
-            "7. 如果原字段已经合理，可以保持原值。",
-            "8. 只返回合法 JSON，不要 markdown，不要解释。",
+            "你负责精校菜谱中的结构化食材，只返回合法 JSON。",
+            "不要改写 ingredients_text、seasonings_text、steps_text、notes_text。",
+            "你只需要输出 ingredients 数组。",
+            "",
+            "严格规则：",
+            "1. name 必须是可以单独采购或明确识别的食材本体。",
+            "2. 不要输出成菜名、套餐名、口味描述、建议句、品牌宣传、比例说明、标点残片。",
+            "3. 对于 A/B、A or B、A（也可用B），拆成多个 ingredient，非主选项 remark=可选。",
+            "4. 对于 可加A、加A更好吃、可放B、也可用C，输出 name=A/B/C，remark=可选。",
+            "5. 对于不是食材实体的内容，直接丢弃。",
+            "6. 不要发明原文中不存在的信息。",
+            "7. 只输出一个 JSON 对象，不要 Markdown，不要解释。",
             "",
             "JSON 格式：",
-            "{",
-            '  "ingredients_text": "主食材文本",',
-            '  "seasonings_text": "调料文本",',
-            '  "steps_text": "做法文本",',
-            '  "notes_text": "备注文本",',
-            '  "ingredients": [',
-            '    {"name": "食材名", "amount": "数量", "unit": "单位", "remark": "备注"}',
-            "  ]",
-            "}",
+            '{"ingredients":[{"name":"","amount":"","unit":"","remark":""}]}',
             "",
-            f"菜名：{recipe['name']}",
-            f"专题库：{recipe['library_section']}",
-            f"分组：{recipe['section_name']}",
-            f"菜系：{recipe['cuisine']} / {recipe['sub_cuisine']}",
-            f"当前食材：{recipe['ingredients_text']}",
-            f"当前调料：{recipe['seasonings_text']}",
-            f"当前做法：{recipe['steps_text']}",
-            f"当前备注：{recipe['notes_text']}",
-            f"来源备注：{recipe['source_reference']}",
-            f"源文本：{recipe['source_text']}",
-            "当前结构化食材：",
-            json.dumps(recipe["ingredients"], ensure_ascii=False),
+            "菜谱信息：",
+            json.dumps(recipe, ensure_ascii=False),
         ]
     )
 
     messages = [
-        {"role": "system", "content": "你是菜谱字段精校器。只输出 JSON。"},
+        {"role": "system", "content": "你是严谨的菜谱结构化整理助手。"},
         {"role": "user", "content": prompt},
     ]
 
@@ -491,7 +513,7 @@ def _generate_refined_recipe(
     except Exception as error:
         create_ai_conversation_log(
             feature="import_refinement",
-            stage="refinement",
+            stage="ingredient_refinement",
             model=model_name,
             request_messages=messages,
             status="error",
@@ -504,7 +526,7 @@ def _generate_refined_recipe(
 
     create_ai_conversation_log(
         feature="import_refinement",
-        stage="refinement",
+        stage="ingredient_refinement",
         model=model_name,
         request_messages=messages,
         status="success",
@@ -515,18 +537,10 @@ def _generate_refined_recipe(
     )
 
     parsed = _extract_json_object(raw_content)
-    ingredients = _normalize_ingredient_items(parsed.get("ingredients"))
-    return {
-        "ingredients_text": str(
-            parsed.get("ingredients_text", "") or recipe["ingredients_text"]
-        ).strip(),
-        "seasonings_text": str(
-            parsed.get("seasonings_text", "") or recipe["seasonings_text"]
-        ).strip(),
-        "steps_text": str(parsed.get("steps_text", "") or recipe["steps_text"]).strip(),
-        "notes_text": str(parsed.get("notes_text", "") or recipe["notes_text"]).strip(),
-        "ingredients": ingredients,
-    }
+    ingredients = _sanitize_refined_ingredients(parsed.get("ingredients"))
+    if not ingredients and (recipe["ingredients_text"] or recipe["ingredients"]):
+        raise ValueError("Model returned no usable ingredient entities")
+    return {"ingredients": ingredients}
 
 
 def _normalize_ingredient_items(value: Any) -> List[Dict[str, Optional[str]]]:
@@ -556,31 +570,230 @@ def _normalize_optional_text(value: Any) -> Optional[str]:
     return text or None
 
 
+def _sanitize_refined_ingredients(value: Any) -> List[Dict[str, Optional[str]]]:
+    normalized = _normalize_ingredient_items(value)
+    result: List[Dict[str, Optional[str]]] = []
+    seen = set()
+
+    for item in normalized:
+        name, amount, unit, remark = _normalize_item_fields(
+            item["name"] or "",
+            item["amount"],
+            item["unit"],
+            item["remark"],
+        )
+
+        for split_name, split_amount, split_unit, split_remark in _split_choice_name(name, amount, unit, remark):
+            clean_name = normalize_ingredient_name(split_name)
+            if not clean_name or _should_drop_refined_name(clean_name):
+                continue
+
+            normalized_item = {
+                "name": clean_name,
+                "amount": split_amount,
+                "unit": split_unit,
+                "remark": _normalize_optional_text(split_remark),
+            }
+            dedupe_key = (
+                normalized_item["name"],
+                normalized_item["amount"] or "",
+                normalized_item["unit"] or "",
+                normalized_item["remark"] or "",
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            result.append(normalized_item)
+
+    return result
+
+
+def _normalize_item_fields(
+    name: str,
+    amount: Optional[str],
+    unit: Optional[str],
+    remark: Optional[str],
+) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
+    candidate = re.sub(r"\s+", "", name or "")
+    candidate = re.sub(r"[()（）\[\]【】]", "", candidate)
+    candidate = _strip_known_prefixes(candidate)
+    candidate, amount, unit, remark = _extract_amount_from_name(candidate, amount, unit, remark)
+    candidate = _extract_named_fragment(candidate)
+    return candidate, amount, unit, remark
+
+
+def _split_choice_name(
+    name: str,
+    amount: Optional[str],
+    unit: Optional[str],
+    remark: Optional[str],
+) -> List[tuple[str, Optional[str], Optional[str], Optional[str]]]:
+    candidate = re.sub(r"\s+", "", name or "")
+    extracted_name, optional_remark = _extract_optional_ingredient_name(candidate, remark)
+    merged_remark = _merge_remarks(optional_remark, remark)
+
+    if re.search(r"(?:/|／|\\|or|OR|或)", extracted_name):
+        parts = [part for part in re.split(r"(?:/|／|\\|or|OR|或)", extracted_name) if part.strip()]
+        split_items: List[tuple[str, Optional[str], Optional[str], Optional[str]]] = []
+        for index, part in enumerate(parts):
+            split_items.append(
+                (
+                    part.strip(),
+                    amount,
+                    unit,
+                    None if index == 0 else _merge_remarks("可选", merged_remark),
+                )
+            )
+        return split_items
+
+    segmented = _segment_compound_name(extracted_name)
+    if len(segmented) > 1:
+        return [(part, amount, unit, merged_remark) for part in segmented]
+
+    return [(extracted_name, amount, unit, merged_remark)]
+
+
+def _strip_known_prefixes(text: str) -> str:
+    candidate = text
+    for prefix in BRAND_PREFIXES:
+        if candidate.startswith(prefix) and len(candidate) > len(prefix):
+            candidate = candidate[len(prefix) :]
+            break
+    for prefix in GENERIC_PREFIXES:
+        if candidate.startswith(prefix) and len(candidate) > len(prefix):
+            candidate = candidate[len(prefix) :]
+            break
+    return candidate
+
+
+def _extract_amount_from_name(
+    text: str,
+    amount: Optional[str],
+    unit: Optional[str],
+    remark: Optional[str],
+) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
+    if amount or unit:
+        return text, amount, unit, remark
+
+    match = AMOUNT_IN_NAME_PATTERN.search(text)
+    if not match:
+        return text, amount, unit, remark
+
+    new_name = match.group("prefix").strip()
+    package_hint = ""
+    package_match = PACKAGE_HINT_PATTERN.search(new_name)
+    if package_match:
+        package_hint = package_match.group(1)
+        new_name = new_name[: -len(package_hint)].strip()
+
+    merged_remark = _merge_remarks(package_hint or None, remark)
+    return new_name, match.group("amount"), match.group("unit"), merged_remark
+
+
+def _extract_named_fragment(text: str) -> str:
+    if "用的" in text:
+        text = text.split("用的", 1)[1]
+    elif "用" in text and len(text.split("用", 1)[1]) >= 2:
+        text = text.split("用", 1)[1]
+    return text
+
+
+def _segment_compound_name(text: str) -> List[str]:
+    candidate = text.strip()
+    results: List[str] = []
+    remaining = candidate
+
+    while remaining:
+        matched = False
+        for segment in sorted(INGREDIENT_SEGMENTS, key=len, reverse=True):
+            if remaining.startswith(segment):
+                results.append(segment)
+                remaining = remaining[len(segment) :]
+                matched = True
+                break
+        if not matched:
+            return [candidate]
+
+    return results if results else [candidate]
+
+
+def _extract_optional_ingredient_name(name: str, remark: Optional[str]) -> tuple[str, Optional[str]]:
+    candidate = name.strip(" ,，。；;:：()（）[]【】")
+    for prefix in OPTIONAL_PREFIXES:
+        if candidate.startswith(prefix) and len(candidate) > len(prefix):
+            return candidate[len(prefix):].strip(), _merge_remarks("可选", remark)
+    for suffix in OPTIONAL_SUFFIXES:
+        if candidate.endswith(suffix) and len(candidate) > len(suffix):
+            return candidate[: -len(suffix)].strip(), _merge_remarks("可选", remark)
+    return candidate, remark
+
+
+def _should_drop_refined_name(name: str) -> bool:
+    compact = re.sub(r"\s+", "", name or "")
+    if not compact:
+        return True
+    if len(compact) > 20:
+        return True
+    if compact in {"%", "％", "1"}:
+        return True
+    return any(hint in compact for hint in DROP_HINTS)
+
+
+def _merge_remarks(primary: Optional[str], secondary: Optional[str]) -> Optional[str]:
+    first = _normalize_optional_text(primary)
+    second = _normalize_optional_text(secondary)
+    if not first:
+        return second
+    if not second or second == first:
+        return first
+    if second in first:
+        return first
+    return f"{first} / {second}"
+
+
 def _apply_refined_recipe(connection, recipe_id: int, refined: Dict[str, Any]) -> None:
     connection.execute(
         """
         UPDATE recipes
-        SET
-            ingredients_text = ?,
-            seasonings_text = ?,
-            steps_text = ?,
-            notes_text = ?,
-            updated_at = CURRENT_TIMESTAMP
+        SET updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (
-            refined["ingredients_text"],
-            refined["seasonings_text"],
-            refined["steps_text"],
-            refined["notes_text"],
+        (recipe_id,),
+    )
+    sync_recipe_ingredients_from_items(connection, recipe_id, refined["ingredients"])
+
+
+def _store_refine_snapshot(
+    connection,
+    *,
+    recipe_id: int,
+    run_id: Optional[int],
+    model_name: str,
+    refine_version: str,
+    before_ingredients: List[Dict[str, Any]],
+    after_ingredients: List[Dict[str, Any]],
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO recipe_refine_snapshots (
             recipe_id,
+            run_id,
+            model,
+            refine_version,
+            before_ingredients_json,
+            after_ingredients_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            recipe_id,
+            run_id,
+            model_name,
+            refine_version,
+            json.dumps(before_ingredients, ensure_ascii=False),
+            json.dumps(after_ingredients, ensure_ascii=False),
         ),
     )
-
-    if refined["ingredients"]:
-        sync_recipe_ingredients_from_items(connection, recipe_id, refined["ingredients"])
-    else:
-        sync_recipe_ingredients(connection, recipe_id, refined["ingredients_text"])
 
 
 def _extract_json_object(raw_text: str) -> Dict[str, Any]:

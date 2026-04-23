@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 
 from app.services.database_browser_service import get_table_rows, list_database_tables
+from app.services.database_transfer_service import get_database_export_info, import_database_file
 
 
 router = APIRouter()
@@ -9,6 +11,31 @@ router = APIRouter()
 @router.get("/database/tables")
 def database_tables():
     return list_database_tables()
+
+
+@router.get("/database/export")
+def export_database():
+    try:
+        export_info = get_database_export_info()
+        return FileResponse(
+            export_info["path"],
+            media_type="application/x-sqlite3",
+            filename=export_info["file_name"],
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Failed to export database: {error}") from error
+
+
+@router.post("/database/import")
+def import_database(file: UploadFile = File(...)):
+    try:
+        return import_database_file(file)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Failed to import database: {error}") from error
 
 
 @router.get("/database/tables/{table_name}")

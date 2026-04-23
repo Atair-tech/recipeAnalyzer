@@ -1,7 +1,8 @@
 import json
 import os
+import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import httpx
 
@@ -13,6 +14,19 @@ from app.services.search_service import natural_search
 OLLAMA_BASE_URL = os.getenv("RECIPE_ANALYZER_OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_DEFAULT_MODEL = os.getenv("RECIPE_ANALYZER_OLLAMA_MODEL", "qwen3:0.6b")
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("RECIPE_ANALYZER_OLLAMA_TIMEOUT", "240"))
+
+FAST_PATH_REPLIES = {
+    "你好": "你好。可以直接问我菜谱、食材、做法、自动标签或筛选相关问题。",
+    "您好": "你好。可以直接问我菜谱、食材、做法、自动标签或筛选相关问题。",
+    "嗨": "你好。可以直接问我菜谱、食材、做法、自动标签或筛选相关问题。",
+    "hello": "你好。可以直接问我菜谱、食材、做法、自动标签或筛选相关问题。",
+    "hi": "你好。可以直接问我菜谱、食材、做法、自动标签或筛选相关问题。",
+    "在吗": "在。你可以直接问我菜谱、食材、做法或筛选相关问题。",
+    "谢谢": "不客气。",
+    "多谢": "不客气。",
+    "收到": "收到。",
+    "好的": "好的。",
+}
 
 
 def _call_ollama_chat_logged(
@@ -108,6 +122,38 @@ def ask_recipe_assistant(
     normalized_history = _normalize_history(history or [])
     selected_recipe = get_recipe(selected_recipe_id) if selected_recipe_id else None
 
+    fast_path_reply = _match_fast_path_reply(normalized_message, selected_recipe_id, normalized_history)
+    if fast_path_reply is not None:
+        return {
+            "message": normalized_message,
+            "model": model_name,
+            "selected_recipe_id": selected_recipe_id,
+            "answer": fast_path_reply,
+            "citations": [],
+            "interpretation": {
+                "intent": "闲聊短句",
+                "concepts": [],
+                "expanded_terms": [],
+                "constraints": [],
+                "retrieval_query": "",
+                "notes": "本轮命中快路径，未进入检索增强流程。",
+                "raw": "",
+                "source": "fast_path",
+            },
+            "retrieval": {
+                "query": "",
+                "understanding": {},
+                "items": [],
+                "total": 0,
+            },
+            "pipeline": {
+                "mode": "fast_path",
+                "interpretation_ms": 0,
+                "retrieval_ms": 0,
+                "answer_ms": 0,
+            },
+        }
+
     interpretation_started = time.perf_counter()
     interpretation = _interpret_user_message(model_name, normalized_message)
     interpretation_elapsed_ms = int((time.perf_counter() - interpretation_started) * 1000)
@@ -162,11 +208,192 @@ def ask_recipe_assistant(
             "total": len(context_items),
         },
         "pipeline": {
+            "mode": "retrieval_augmented",
             "interpretation_ms": interpretation_elapsed_ms,
             "retrieval_ms": retrieval_elapsed_ms,
             "answer_ms": answer_elapsed_ms,
         },
     }
+
+
+def stream_recipe_assistant(
+    message: str,
+    model: Optional[str] = None,
+    selected_recipe_id: Optional[int] = None,
+    top_k: int = 6,
+    history: Optional[List[Dict[str, str]]] = None,
+    show_reasoning: bool = False,
+) -> Generator[str, None, None]:
+    normalized_message = (message or "").strip()
+    if not normalized_message:
+        raise ValueError("Message is required")
+
+    model_name = (model or OLLAMA_DEFAULT_MODEL).strip()
+    safe_top_k = max(1, min(int(top_k), 12))
+    normalized_history = _normalize_history(history or [])
+    selected_recipe = get_recipe(selected_recipe_id) if selected_recipe_id else None
+
+    fast_path_reply = _match_fast_path_reply(normalized_message, selected_recipe_id, normalized_history)
+    if fast_path_reply is not None:
+        result = {
+            "message": normalized_message,
+            "model": model_name,
+            "selected_recipe_id": selected_recipe_id,
+            "answer": fast_path_reply,
+            "citations": [],
+            "interpretation": {
+                "intent": "闲聊短句",
+                "concepts": [],
+                "expanded_terms": [],
+                "constraints": [],
+                "retrieval_query": "",
+                "notes": "本轮命中快路径，未进入检索增强流程。",
+                "raw": "",
+                "source": "fast_path",
+            },
+            "retrieval": {"query": "", "understanding": {}, "items": [], "total": 0},
+            "pipeline": {
+                "mode": "fast_path",
+                "interpretation_ms": 0,
+                "retrieval_ms": 0,
+                "answer_ms": 0,
+            },
+        }
+        yield _encode_stream_event({"type": "stage", "stage": "fast_path"})
+        yield _encode_stream_event({"type": "answer_chunk", "delta": fast_path_reply})
+        yield _encode_stream_event({"type": "final", "result": result})
+        return
+
+    interpretation_started = time.perf_counter()
+    yield _encode_stream_event({"type": "stage", "stage": "interpretation"})
+    interpretation = _interpret_user_message(model_name, normalized_message)
+    interpretation_elapsed_ms = int((time.perf_counter() - interpretation_started) * 1000)
+    yield _encode_stream_event({"type": "interpretation", "data": interpretation})
+
+    retrieval_query = interpretation.get("retrieval_query") or normalized_message
+    retrieval_extra_terms = interpretation.get("expanded_terms") or []
+
+    retrieval_started = time.perf_counter()
+    yield _encode_stream_event({"type": "stage", "stage": "retrieval"})
+    search_result = natural_search(
+        retrieval_query,
+        limit=safe_top_k,
+        offset=0,
+        extra_terms=retrieval_extra_terms,
+    )
+    context_items = _build_context_items(search_result.get("items", []), selected_recipe)
+    citations = _build_citations(context_items)
+    retrieval_elapsed_ms = int((time.perf_counter() - retrieval_started) * 1000)
+    retrieval_payload = {
+        "query": retrieval_query,
+        "understanding": search_result.get("understanding", {}),
+        "items": context_items,
+        "total": len(context_items),
+    }
+    yield _encode_stream_event({"type": "retrieval", "data": retrieval_payload})
+
+    answer_started = time.perf_counter()
+    yield _encode_stream_event({"type": "stage", "stage": "answer"})
+    messages = _build_chat_messages(
+        user_message=normalized_message,
+        selected_recipe=selected_recipe,
+        context_items=context_items,
+        history=normalized_history,
+        interpretation=interpretation,
+    )
+
+    answer_parts: List[str] = []
+    thinking_parts: List[str] = []
+    try:
+        for chunk in _stream_ollama_chat(model_name, messages, include_thinking=show_reasoning):
+            if chunk["type"] == "answer_chunk":
+                answer_parts.append(chunk["delta"])
+            elif chunk["type"] == "thinking_chunk":
+                thinking_parts.append(chunk["delta"])
+            yield _encode_stream_event(chunk)
+    except Exception as error:
+        create_ai_conversation_log(
+            feature="assistant_chat",
+            stage="answer",
+            model=model_name,
+            request_messages=messages,
+            status="error",
+            recipe_id=selected_recipe_id,
+            error_text=str(error),
+            meta={
+                "message": normalized_message,
+                "top_k": safe_top_k,
+                "retrieval_query": retrieval_query,
+                "stream": True,
+            },
+        )
+        raise
+
+    answer = "".join(answer_parts).strip()
+    answer_elapsed_ms = int((time.perf_counter() - answer_started) * 1000)
+    if not answer:
+        raise RuntimeError("Ollama returned an empty response")
+
+    if show_reasoning and thinking_parts:
+        interpretation["raw_thinking"] = "".join(thinking_parts).strip()
+
+    create_ai_conversation_log(
+        feature="assistant_chat",
+        stage="answer",
+        model=model_name,
+        request_messages=messages,
+        status="success",
+        recipe_id=selected_recipe_id,
+        response_text=answer,
+        meta={
+            "message": normalized_message,
+            "top_k": safe_top_k,
+            "retrieval_query": retrieval_query,
+            "stream": True,
+            "thinking": "".join(thinking_parts).strip() if thinking_parts else "",
+        },
+    )
+
+    result = {
+        "message": normalized_message,
+        "model": model_name,
+        "selected_recipe_id": selected_recipe_id,
+        "answer": answer,
+        "citations": citations,
+        "interpretation": interpretation,
+        "retrieval": retrieval_payload,
+        "pipeline": {
+            "mode": "retrieval_augmented",
+            "interpretation_ms": interpretation_elapsed_ms,
+            "retrieval_ms": retrieval_elapsed_ms,
+            "answer_ms": answer_elapsed_ms,
+        },
+    }
+    yield _encode_stream_event({"type": "final", "result": result})
+
+
+def _match_fast_path_reply(
+    message: str,
+    selected_recipe_id: Optional[int],
+    history: List[Dict[str, str]],
+) -> Optional[str]:
+    if selected_recipe_id:
+        return None
+
+    if history:
+        return None
+
+    normalized = re.sub(r"\s+", "", message.strip().lower())
+    if not normalized:
+        return None
+
+    if normalized in FAST_PATH_REPLIES:
+        return FAST_PATH_REPLIES[normalized]
+
+    if len(normalized) <= 4 and normalized in {"ok", "oki", "ok啦"}:
+        return "收到。"
+
+    return None
 
 
 def _interpret_user_message(model: str, message: str) -> Dict[str, Any]:
@@ -232,14 +459,7 @@ def _interpret_user_message(model: str, message: str) -> Dict[str, Any]:
 
 
 def _call_ollama_chat(model: str, messages: List[Dict[str, str]]) -> str:
-    payload = {
-        "model": model,
-        "stream": False,
-        "messages": messages,
-        "options": {
-            "temperature": 0.2,
-        },
-    }
+    payload = _build_ollama_payload(model, messages, stream=False, include_thinking=False)
 
     with httpx.Client(timeout=OLLAMA_TIMEOUT_SECONDS, trust_env=False) as client:
         response = client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
@@ -250,6 +470,52 @@ def _call_ollama_chat(model: str, messages: List[Dict[str, str]]) -> str:
     if not content:
         raise RuntimeError("Ollama returned an empty response")
     return content
+
+
+def _stream_ollama_chat(
+    model: str,
+    messages: List[Dict[str, str]],
+    *,
+    include_thinking: bool,
+) -> Generator[Dict[str, str], None, None]:
+    payload = _build_ollama_payload(model, messages, stream=True, include_thinking=include_thinking)
+
+    with httpx.Client(timeout=OLLAMA_TIMEOUT_SECONDS, trust_env=False) as client:
+        with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=payload) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                message = chunk.get("message") or {}
+                thinking_delta = (message.get("thinking") or "").strip()
+                if include_thinking and thinking_delta:
+                    yield {"type": "thinking_chunk", "delta": thinking_delta}
+                content_delta = (message.get("content") or "").strip()
+                if content_delta:
+                    yield {"type": "answer_chunk", "delta": content_delta}
+
+
+def _build_ollama_payload(
+    model: str,
+    messages: List[Dict[str, str]],
+    *,
+    stream: bool,
+    include_thinking: bool,
+) -> Dict[str, Any]:
+    options: Dict[str, Any] = {"temperature": 0.2}
+    if not include_thinking:
+        options["thinking"] = False
+    return {
+        "model": model,
+        "stream": stream,
+        "messages": messages,
+        "options": options,
+    }
+
+
+def _encode_stream_event(payload: Dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
 def _build_chat_messages(
@@ -435,17 +701,36 @@ def _build_citations(context_items: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 def _extract_json_object(raw_text: str) -> Dict[str, Any]:
     cleaned = raw_text.strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.S | re.I).strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("```", 1)[1]
         cleaned = cleaned.rsplit("```", 1)[0]
         cleaned = cleaned.replace("json", "", 1).strip()
 
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("JSON object not found")
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
 
-    return json.loads(cleaned[start : end + 1])
+    decoder = json.JSONDecoder()
+    last_object: Optional[Dict[str, Any]] = None
+
+    for index, char in enumerate(cleaned):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(cleaned, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            last_object = parsed
+
+    if last_object is not None:
+        return last_object
+
+    raise ValueError("JSON object not found")
 
 
 def _normalize_string_list(value: Any) -> List[str]:

@@ -156,6 +156,18 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_recipe_refine_reviews_status
+        ON recipe_refine_reviews(status, updated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_recipe_refine_snapshots_recipe
+        ON recipe_refine_snapshots(recipe_id, created_at DESC)
+        """
+    )
+    connection.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_ai_conversation_logs_feature
         ON ai_conversation_logs(feature, status, created_at)
         """

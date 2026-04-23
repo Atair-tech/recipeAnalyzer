@@ -8,6 +8,7 @@ import ImportHistory from "./components/ImportHistory";
 import ImportRefinementPanel from "./components/ImportRefinementPanel";
 import ImportWorkspace from "./components/ImportWorkspace";
 import PairingReview from "./components/PairingReview";
+import RefineReview from "./components/RefineReview";
 import RecipeDetail from "./components/RecipeDetail";
 import RecipeList from "./components/RecipeList";
 import Sidebar from "./components/Sidebar";
@@ -355,13 +356,22 @@ export default function App() {
 
         {selectedSection === "pairing" ? <PairingReview reloadToken={reloadToken} /> : null}
 
+        {selectedSection === "refineReview" ? <RefineReview /> : null}
+
         {selectedSection === "database" ? <DatabaseBrowser /> : null}
 
         {selectedSection === "aiLogs" ? <AiLogViewer /> : null}
 
         {selectedSection === "analytics" ? <AnalyticsDashboard reloadToken={reloadToken} /> : null}
 
-        {selectedSection === "tagging" ? <TagManagement /> : null}
+        {selectedSection === "tagging" ? (
+          <TagManagement
+            onOpenRecipe={(recipeId) => {
+              setSelectedRecipeId(recipeId);
+              setSelectedSection("recipes");
+            }}
+          />
+        ) : null}
 
         {selectedSection === "ai" ? (
           <AITools

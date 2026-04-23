@@ -128,6 +128,106 @@ def delete_managed_tag(tag_id: int) -> bool:
         return True
 
 
+def list_managed_tag_recipes(tag_id: int, search: str = "", limit: int = 100) -> Dict[str, Any]:
+    normalized_search = (search or "").strip()
+    safe_limit = max(1, min(int(limit), 200))
+
+    with get_connection() as connection:
+        tag = connection.execute(
+            """
+            SELECT id, name, description, is_active, sort_order
+            FROM managed_tags
+            WHERE id = ?
+            """,
+            (tag_id,),
+        ).fetchone()
+        if tag is None:
+            raise ValueError("Managed tag not found")
+
+        params: List[Any] = [tag_id]
+        search_sql = ""
+        if normalized_search:
+            search_sql = """
+            AND (
+                r.name LIKE ?
+                OR COALESCE(r.library_section, '') LIKE ?
+                OR COALESCE(r.section_name, '') LIKE ?
+            )
+            """
+            pattern = f"%{normalized_search}%"
+            params.extend([pattern, pattern, pattern])
+
+        params.append(safe_limit)
+        rows = connection.execute(
+            f"""
+            SELECT
+                r.id AS recipe_id,
+                r.name,
+                r.library_section,
+                r.section_name,
+                r.record_kind,
+                rmt.confidence,
+                rmt.reason,
+                rmt.updated_at
+            FROM recipe_managed_tags AS rmt
+            INNER JOIN recipes AS r ON r.id = rmt.recipe_id
+            WHERE rmt.managed_tag_id = ?
+            {search_sql}
+            ORDER BY rmt.updated_at DESC, r.id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
+    return {
+        "tag": {
+            "id": tag["id"],
+            "name": tag["name"],
+            "description": tag["description"] or "",
+            "is_active": bool(tag["is_active"]),
+            "sort_order": tag["sort_order"],
+        },
+        "items": [
+            {
+                "recipe_id": row["recipe_id"],
+                "name": row["name"],
+                "library_section": row["library_section"] or "",
+                "section_name": row["section_name"] or "",
+                "record_kind": row["record_kind"],
+                "confidence": row["confidence"],
+                "reason": row["reason"] or "",
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ],
+    }
+
+
+def remove_managed_tag_assignment(tag_id: int, recipe_id: int) -> Dict[str, Any]:
+    with get_connection() as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM recipe_managed_tags
+            WHERE managed_tag_id = ? AND recipe_id = ?
+            """,
+            (tag_id, recipe_id),
+        ).fetchone()
+        if existing is None:
+            raise ValueError("Tag assignment not found")
+
+        connection.execute(
+            """
+            DELETE FROM recipe_managed_tags
+            WHERE managed_tag_id = ? AND recipe_id = ?
+            """,
+            (tag_id, recipe_id),
+        )
+        connection.commit()
+
+    return {"deleted": True, "tag_id": tag_id, "recipe_id": recipe_id}
+
+
 def get_tagging_status() -> Dict[str, Any]:
     with get_connection() as connection:
         run = _load_latest_run(connection)

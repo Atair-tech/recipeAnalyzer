@@ -14,25 +14,19 @@ async function request(path, options = {}) {
   return response.json();
 }
 
+function buildApiUrl(path) {
+  return `${API_BASE_URL}${path}`;
+}
+
 async function download(path, fallbackFileName) {
-  const response = await fetch(`${API_BASE_URL}${path}`);
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
-
-  const blob = await response.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  const contentDisposition = response.headers.get("Content-Disposition") || "";
-  const match = contentDisposition.match(/filename="(.+)"/);
-  const fileName = match?.[1] ?? fallbackFileName;
-
+  const fileName = fallbackFileName;
   const link = document.createElement("a");
-  link.href = objectUrl;
+  link.href = buildApiUrl(path);
   link.download = fileName;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(objectUrl);
+  return { fileName };
 }
 
 export function fetchHealth() {
@@ -45,6 +39,19 @@ export function fetchOverview() {
 
 export function fetchDatabaseTables() {
   return request("/database/tables");
+}
+
+export function exportDatabase() {
+  return download("/database/export", "recipe_analyzer_backup.db");
+}
+
+export function importDatabase(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return request("/database/import", {
+    method: "POST",
+    body: formData
+  });
 }
 
 export function fetchDatabaseTableRows(tableName, { limit = 50, offset = 0 } = {}) {
@@ -101,6 +108,61 @@ export function askLlm(payload) {
   });
 }
 
+export async function askLlmStream(payload, { onEvent } = {}) {
+  const response = await fetch(`${API_BASE_URL}/ai/llm/chat/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response is not available");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let finalResult = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
+      }
+      const event = JSON.parse(line);
+      if (onEvent) {
+        onEvent(event);
+      }
+      if (event.type === "error") {
+        throw new Error(event.error || "Streaming request failed");
+      }
+      if (event.type === "final") {
+        finalResult = event.result;
+      }
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error("Streaming completed without a final result");
+  }
+
+  return finalResult;
+}
+
 export function fetchAiLogs({ limit = 50, offset = 0, feature = "", status = "" } = {}) {
   const params = new URLSearchParams({
     limit: String(limit),
@@ -149,6 +211,22 @@ export function deleteManagedTag(tagId) {
   });
 }
 
+export function fetchManagedTagRecipes(tagId, { search = "", limit = 100 } = {}) {
+  const params = new URLSearchParams({
+    limit: String(limit)
+  });
+  if (search) {
+    params.set("search", search);
+  }
+  return request(`/tagging/tags/${tagId}/recipes?${params.toString()}`);
+}
+
+export function deleteManagedTagRecipe(tagId, recipeId) {
+  return request(`/tagging/tags/${tagId}/recipes/${recipeId}`, {
+    method: "DELETE"
+  });
+}
+
 export function fetchTaggingStatus() {
   return request("/tagging/status");
 }
@@ -172,6 +250,41 @@ export function pauseTaggingRun() {
 export function resumeTaggingRun() {
   return request("/tagging/run/resume", {
     method: "POST"
+  });
+}
+
+export function fetchRefineReviewItems({ search = "", status = "all", limit = 200 } = {}) {
+  const params = new URLSearchParams({
+    status,
+    limit: String(limit)
+  });
+  if (search) {
+    params.set("search", search);
+  }
+  return request(`/imports/refine/review?${params.toString()}`);
+}
+
+export function fetchRefineReviewDetail(recipeId) {
+  return request(`/imports/refine/review/${recipeId}`);
+}
+
+export function updateRefineReview(recipeId, payload) {
+  return request(`/imports/refine/review/${recipeId}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function rerunRefineReview(recipeId, model) {
+  return request(`/imports/refine/review/${recipeId}/rerun`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ model })
   });
 }
 

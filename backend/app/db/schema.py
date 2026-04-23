@@ -184,6 +184,29 @@ SCHEMA_STATEMENTS = [
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS recipe_refine_reviews (
+        recipe_id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        note TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS recipe_refine_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recipe_id INTEGER NOT NULL,
+        run_id INTEGER,
+        model TEXT,
+        refine_version TEXT,
+        before_ingredients_json TEXT NOT NULL,
+        after_ingredients_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
+        FOREIGN KEY (run_id) REFERENCES ai_refine_runs(id) ON DELETE SET NULL
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS ai_conversation_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         feature TEXT NOT NULL,

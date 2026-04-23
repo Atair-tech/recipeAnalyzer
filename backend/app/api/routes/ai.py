@@ -1,13 +1,14 @@
 from typing import Optional
+import json
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app.services.ai_log_service import get_ai_conversation_log, list_ai_conversation_logs
 from app.services.excel_export_service import build_excel_bytes, normalize_filename
-from app.services.ollama_service import ask_recipe_assistant, get_ollama_status, list_ollama_models
+from app.services.ollama_service import ask_recipe_assistant, get_ollama_status, list_ollama_models, stream_recipe_assistant
 from app.services.search_service import get_natural_search_export_rows, natural_search
 from app.services.tag_suggestion_service import suggest_tags_for_recipe
 
@@ -21,6 +22,7 @@ class LlmChatRequest(BaseModel):
     selected_recipe_id: Optional[int] = None
     top_k: int = 6
     history: list[dict[str, str]] = []
+    show_reasoning: bool = False
 
 
 @router.get("/ai/natural-search")
@@ -88,6 +90,28 @@ def ai_llm_chat(payload: LlmChatRequest):
         raise HTTPException(status_code=503, detail=f"Ollama request failed: {error}") from error
     except RuntimeError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@router.post("/ai/llm/chat/stream")
+def ai_llm_chat_stream(payload: LlmChatRequest):
+    def event_stream():
+        try:
+            yield from stream_recipe_assistant(
+                message=payload.message,
+                model=payload.model,
+                selected_recipe_id=payload.selected_recipe_id,
+                top_k=payload.top_k,
+                history=payload.history,
+                show_reasoning=payload.show_reasoning,
+            )
+        except ValueError as error:
+            yield json.dumps({"type": "error", "error": str(error)}, ensure_ascii=False) + "\n"
+        except httpx.HTTPError as error:
+            yield json.dumps({"type": "error", "error": f"Ollama request failed: {error}"}, ensure_ascii=False) + "\n"
+        except RuntimeError as error:
+            yield json.dumps({"type": "error", "error": str(error)}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @router.get("/ai/logs")

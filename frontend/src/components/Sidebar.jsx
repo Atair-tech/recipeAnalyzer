@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 function isManagementSection(sectionKey) {
-  return ["tagging", "imports", "pairing", "database", "aiLogs"].includes(sectionKey);
+  return ["tagging", "imports", "refineReview", "pairing", "database", "aiLogs"].includes(sectionKey);
 }
 
 export default function Sidebar({ health, overview, selectedSection, onSelectSection }) {
@@ -11,15 +11,16 @@ export default function Sidebar({ health, overview, selectedSection, onSelectSec
     { key: "overview", label: "总览" },
     { key: "recipes", label: "菜谱库" },
     { key: "ai", label: "智能问答" },
-    { key: "analytics", label: "数据分析" }
+    { key: "analytics", label: "数据分析" },
   ];
 
   const managementSections = [
     { key: "tagging", label: "标签管理" },
     { key: "imports", label: "导入 Excel" },
+    { key: "refineReview", label: "食材审查" },
     { key: "pairing", label: "菜谱配对" },
     { key: "database", label: "查看数据库" },
-    { key: "aiLogs", label: "AI 对话记录" }
+    { key: "aiLogs", label: "AI 对话记录" },
   ];
 
   return (

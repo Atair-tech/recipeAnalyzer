@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  askLlm,
+  askLlmStream,
   exportNaturalSearch,
   fetchLlmModels,
   fetchLlmStatus,
@@ -10,6 +10,7 @@ import {
 } from "../lib/api";
 
 const PAGE_SIZE = 10;
+const LONG_WAIT_MS = 15000;
 
 function SearchResultCard({ item, onOpenRecipe }) {
   return (
@@ -83,13 +84,20 @@ function InterpretationPanel({ interpretation, retrieval }) {
     return null;
   }
 
+  const sourceLabel =
+    interpretation.source === "llm"
+      ? "模型解释"
+      : interpretation.source === "fast_path"
+        ? "快速回复"
+        : "回退规则";
+
   return (
     <section className="detail-section">
       <h3>概念解释</h3>
       <div className="detail-grid detail-grid-wide">
         <div className="detail-stat">
           <span>来源</span>
-          <strong>{interpretation.source === "llm" ? "模型解释" : "回退规则"}</strong>
+          <strong>{sourceLabel}</strong>
         </div>
         <div className="detail-stat">
           <span>检索短句</span>
@@ -119,6 +127,22 @@ function InterpretationPanel({ interpretation, retrieval }) {
   );
 }
 
+function pipelineStageLabel(stage) {
+  if (stage === "fast_path") {
+    return "快速回复中";
+  }
+  if (stage === "interpretation") {
+    return "正在解释问题";
+  }
+  if (stage === "retrieval") {
+    return "正在检索菜谱";
+  }
+  if (stage === "answer") {
+    return "正在生成回答";
+  }
+  return "";
+}
+
 export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe }) {
   const [query, setQuery] = useState("");
   const [searchResult, setSearchResult] = useState(null);
@@ -135,10 +159,20 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
   const [llmModel, setLlmModel] = useState("");
   const [llmQuestion, setLlmQuestion] = useState("");
   const [llmTopK, setLlmTopK] = useState(6);
+  const [useSelectedRecipeContext, setUseSelectedRecipeContext] = useState(true);
+  const [showReasoning, setShowReasoning] = useState(false);
   const [llmLoading, setLlmLoading] = useState(false);
   const [llmError, setLlmError] = useState("");
   const [llmHistory, setLlmHistory] = useState([]);
   const [llmResult, setLlmResult] = useState(null);
+  const [llmStage, setLlmStage] = useState("");
+  const [longWaitHint, setLongWaitHint] = useState("");
+  const [streamThinking, setStreamThinking] = useState("");
+  const [streamAnswer, setStreamAnswer] = useState("");
+  const [streamInterpretation, setStreamInterpretation] = useState(null);
+  const [streamRetrieval, setStreamRetrieval] = useState(null);
+
+  const longWaitTimerRef = useRef(null);
 
   useEffect(() => {
     let active = true;
@@ -206,6 +240,27 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (longWaitTimerRef.current) {
+        window.clearTimeout(longWaitTimerRef.current);
+      }
+    };
+  }, []);
+
+  function resetLlmProgress() {
+    if (longWaitTimerRef.current) {
+      window.clearTimeout(longWaitTimerRef.current);
+      longWaitTimerRef.current = null;
+    }
+    setLlmStage("");
+    setLongWaitHint("");
+    setStreamThinking("");
+    setStreamAnswer("");
+    setStreamInterpretation(null);
+    setStreamRetrieval(null);
+  }
+
   async function runSearch(offset = 0) {
     if (!query.trim()) {
       setSearchResult(null);
@@ -236,18 +291,42 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
       role: item.role,
       content: item.content
     }));
+    const withContext = useSelectedRecipeContext ? selectedRecipeId || null : null;
 
     setLlmLoading(true);
     setLlmError("");
+    resetLlmProgress();
+    setLlmStage(!withContext && llmHistory.length === 0 && userMessage.length <= 8 ? "fast_path" : "interpretation");
+    longWaitTimerRef.current = window.setTimeout(() => {
+      setLongWaitHint("本地模型响应较慢。可以继续等待，也可以稍后重试。");
+    }, LONG_WAIT_MS);
 
     try {
-      const result = await askLlm({
-        message: userMessage,
-        model: llmModel || undefined,
-        selected_recipe_id: selectedRecipeId || null,
-        top_k: llmTopK,
-        history: requestHistory
-      });
+      const result = await askLlmStream(
+        {
+          message: userMessage,
+          model: llmModel || undefined,
+          selected_recipe_id: withContext,
+          top_k: llmTopK,
+          history: requestHistory,
+          show_reasoning: showReasoning
+        },
+        {
+          onEvent: (event) => {
+            if (event.type === "stage") {
+              setLlmStage(event.stage || "");
+            } else if (event.type === "interpretation") {
+              setStreamInterpretation(event.data || null);
+            } else if (event.type === "retrieval") {
+              setStreamRetrieval(event.data || null);
+            } else if (event.type === "thinking_chunk") {
+              setStreamThinking((current) => current + (event.delta || ""));
+            } else if (event.type === "answer_chunk") {
+              setStreamAnswer((current) => current + (event.delta || ""));
+            }
+          }
+        }
+      );
 
       setLlmHistory((current) => [
         ...current,
@@ -256,9 +335,22 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
       ]);
       setLlmResult(result);
       setLlmQuestion("");
+      setStreamInterpretation(result.interpretation || null);
+      setStreamRetrieval(result.retrieval || null);
+      setStreamAnswer(result.answer || "");
+      if (result.interpretation?.raw_thinking) {
+        setStreamThinking(result.interpretation.raw_thinking);
+      }
+      setLlmStage(result.pipeline?.mode === "fast_path" ? "fast_path" : "answer");
+      setLongWaitHint("");
     } catch (requestError) {
       setLlmError(requestError.message);
+      setLlmStage("");
     } finally {
+      if (longWaitTimerRef.current) {
+        window.clearTimeout(longWaitTimerRef.current);
+        longWaitTimerRef.current = null;
+      }
       setLlmLoading(false);
     }
   }
@@ -267,6 +359,7 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
     setLlmHistory([]);
     setLlmResult(null);
     setLlmError("");
+    resetLlmProgress();
   }
 
   const total = searchResult?.total ?? 0;
@@ -286,12 +379,15 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
     });
   }, [llmModels, llmStatus]);
 
+  const displayedInterpretation = llmResult?.interpretation || streamInterpretation;
+  const displayedRetrieval = llmResult?.retrieval || streamRetrieval;
+
   return (
     <div className="section-stack">
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">LLM assistant</p>
+            <p className="eyebrow">LLM Assistant</p>
             <h2>智能问答</h2>
           </div>
         </div>
@@ -367,8 +463,25 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
               {selectedRecipe.library_section ? ` / ${selectedRecipe.library_section}` : ""}
               {selectedRecipe.section_name ? ` / ${selectedRecipe.section_name}` : ""}
             </p>
+            <label className="toggle-shell" style={{ marginTop: 12 }}>
+              <input
+                type="checkbox"
+                checked={useSelectedRecipeContext}
+                onChange={(event) => setUseSelectedRecipeContext(event.target.checked)}
+              />
+              <span>把当前菜谱作为上下文</span>
+            </label>
           </div>
         ) : null}
+
+        <label className="toggle-shell">
+          <input
+            type="checkbox"
+            checked={showReasoning}
+            onChange={(event) => setShowReasoning(event.target.checked)}
+          />
+          <span>显示推理过程</span>
+        </label>
 
         <div className="action-row">
           <button
@@ -379,12 +492,44 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
           >
             {llmLoading ? "处理中..." : "发送"}
           </button>
-          <button type="button" className="action-button secondary" onClick={clearChat} disabled={llmLoading || llmHistory.length === 0}>
+          <button
+            type="button"
+            className="action-button secondary"
+            onClick={clearChat}
+            disabled={llmLoading || llmHistory.length === 0}
+          >
             清空对话
           </button>
         </div>
 
+        {llmLoading && llmStage ? (
+          <div className="warning-banner">
+            {pipelineStageLabel(llmStage)}
+            {longWaitHint ? `。${longWaitHint}` : ""}
+          </div>
+        ) : null}
+
+        {!llmLoading && longWaitHint ? <div className="warning-banner">{longWaitHint}</div> : null}
         {llmError ? <div className="error-banner">{llmError}</div> : null}
+
+        {showReasoning && (streamThinking || displayedInterpretation) ? (
+          <section className="detail-section">
+            <h3>推理过程</h3>
+            {displayedInterpretation ? (
+              <p className="recipe-meta">
+                {displayedInterpretation.intent ? `意图：${displayedInterpretation.intent}` : "正在生成解释..."}
+              </p>
+            ) : null}
+            <pre className="stream-box">{streamThinking || "正在等待模型推理输出..."}</pre>
+          </section>
+        ) : null}
+
+        {llmLoading && streamAnswer ? (
+          <section className="detail-section">
+            <h3>实时回答</h3>
+            <pre className="stream-box">{streamAnswer}</pre>
+          </section>
+        ) : null}
 
         {llmHistory.length > 0 ? (
           <section className="detail-section">
@@ -397,96 +542,106 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
           </section>
         ) : null}
 
-        {llmResult ? (
+        {llmResult || displayedInterpretation ? (
           <div className="section-stack">
-            <InterpretationPanel interpretation={llmResult.interpretation} retrieval={llmResult.retrieval} />
+            <InterpretationPanel interpretation={displayedInterpretation} retrieval={displayedRetrieval} />
 
-            <section className="detail-section">
-              <h3>检索阶段</h3>
-              <div className="detail-grid detail-grid-wide">
-                <div className="detail-stat">
-                  <span>命中条目</span>
-                  <strong>{llmResult.retrieval?.total ?? 0}</strong>
+            {displayedRetrieval ? (
+              <section className="detail-section">
+                <h3>检索阶段</h3>
+                <div className="detail-grid detail-grid-wide">
+                  <div className="detail-stat">
+                    <span>命中条目</span>
+                    <strong>{displayedRetrieval.total ?? 0}</strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>规则理解</span>
+                    <strong>{Object.values(displayedRetrieval.understanding || {}).flat().length}</strong>
+                  </div>
+                  <div className="detail-stat">
+                    <span>执行模式</span>
+                    <strong>{llmResult?.pipeline?.mode === "fast_path" ? "快速回复" : "检索增强"}</strong>
+                  </div>
                 </div>
-                <div className="detail-stat">
-                  <span>规则理解</span>
-                  <strong>{Object.values(llmResult.retrieval?.understanding || {}).flat().length}</strong>
-                </div>
-              </div>
-              <div className="tag-row">
-                {(llmResult.retrieval?.understanding?.library_sections || []).map((item) => (
-                  <span key={`llm-section-${item}`} className="tag">
-                    专题库: {item}
-                  </span>
-                ))}
-                {(llmResult.retrieval?.understanding?.section_names || []).map((item) => (
-                  <span key={`llm-group-${item}`} className="tag">
-                    分组: {item}
-                  </span>
-                ))}
-                {(llmResult.retrieval?.understanding?.cuisines || []).map((item) => (
-                  <span key={`llm-cuisine-${item}`} className="tag">
-                    菜系: {item}
-                  </span>
-                ))}
-                {(llmResult.retrieval?.understanding?.include_ingredients || []).map((item) => (
-                  <span key={`llm-include-${item}`} className="tag">
-                    食材: {item}
-                  </span>
-                ))}
-                {(llmResult.retrieval?.understanding?.exclude_ingredients || []).map((item) => (
-                  <span key={`llm-exclude-${item}`} className="tag muted">
-                    排除: {item}
-                  </span>
-                ))}
-                {(llmResult.retrieval?.understanding?.free_text_terms || []).map((item) => (
-                  <span key={`llm-term-${item}`} className="tag">
-                    关键词: {item}
-                  </span>
-                ))}
-              </div>
-              {llmResult.retrieval?.items?.length ? (
-                <div className="recipe-list ai-result-list">
-                  {llmResult.retrieval.items.map((item) => (
-                    <RecipeRefCard key={`retrieval-${item.id}-${item.source}`} item={item} onOpenRecipe={onOpenRecipe} />
+                <div className="tag-row">
+                  {(displayedRetrieval.understanding?.library_sections || []).map((item) => (
+                    <span key={`llm-section-${item}`} className="tag">
+                      专题库: {item}
+                    </span>
+                  ))}
+                  {(displayedRetrieval.understanding?.section_names || []).map((item) => (
+                    <span key={`llm-group-${item}`} className="tag">
+                      分组: {item}
+                    </span>
+                  ))}
+                  {(displayedRetrieval.understanding?.cuisines || []).map((item) => (
+                    <span key={`llm-cuisine-${item}`} className="tag">
+                      菜系: {item}
+                    </span>
+                  ))}
+                  {(displayedRetrieval.understanding?.include_ingredients || []).map((item) => (
+                    <span key={`llm-include-${item}`} className="tag">
+                      食材: {item}
+                    </span>
+                  ))}
+                  {(displayedRetrieval.understanding?.exclude_ingredients || []).map((item) => (
+                    <span key={`llm-exclude-${item}`} className="tag muted">
+                      排除: {item}
+                    </span>
+                  ))}
+                  {(displayedRetrieval.understanding?.free_text_terms || []).map((item) => (
+                    <span key={`llm-term-${item}`} className="tag">
+                      关键词: {item}
+                    </span>
                   ))}
                 </div>
-              ) : (
-                <p>本轮没有检索到可用菜谱上下文。</p>
-              )}
-            </section>
+                {displayedRetrieval.items?.length ? (
+                  <div className="recipe-list ai-result-list">
+                    {displayedRetrieval.items.map((item) => (
+                      <RecipeRefCard key={`retrieval-${item.id}-${item.source}`} item={item} onOpenRecipe={onOpenRecipe} />
+                    ))}
+                  </div>
+                ) : (
+                  <p>本轮没有检索到可用菜谱上下文。</p>
+                )}
+              </section>
+            ) : null}
 
-            <section className="detail-section">
-              <h3>回答阶段</h3>
-              <div className="detail-grid detail-grid-wide">
-                <div className="detail-stat">
-                  <span>概念解释耗时</span>
-                  <strong>{llmResult.pipeline?.interpretation_ms ?? 0} ms</strong>
-                </div>
-                <div className="detail-stat">
-                  <span>检索耗时</span>
-                  <strong>{llmResult.pipeline?.retrieval_ms ?? 0} ms</strong>
-                </div>
-                <div className="detail-stat">
-                  <span>回答耗时</span>
-                  <strong>{llmResult.pipeline?.answer_ms ?? 0} ms</strong>
-                </div>
-              </div>
-              <p style={{ whiteSpace: "pre-wrap" }}>{llmResult.answer}</p>
-            </section>
+            {llmResult ? (
+              <>
+                <section className="detail-section">
+                  <h3>回答阶段</h3>
+                  <div className="detail-grid detail-grid-wide">
+                    <div className="detail-stat">
+                      <span>概念解释耗时</span>
+                      <strong>{llmResult.pipeline?.interpretation_ms ?? 0} ms</strong>
+                    </div>
+                    <div className="detail-stat">
+                      <span>检索耗时</span>
+                      <strong>{llmResult.pipeline?.retrieval_ms ?? 0} ms</strong>
+                    </div>
+                    <div className="detail-stat">
+                      <span>回答耗时</span>
+                      <strong>{llmResult.pipeline?.answer_ms ?? 0} ms</strong>
+                    </div>
+                  </div>
+                  <p style={{ whiteSpace: "pre-wrap" }}>{llmResult.answer}</p>
+                </section>
 
-            <section className="detail-section">
-              <h3>本轮引用</h3>
-              {llmResult.citations?.length ? (
-                <div className="recipe-list ai-result-list">
-                  {llmResult.citations.map((item) => (
-                    <RecipeRefCard key={`citation-${item.id}-${item.source || "citation"}`} item={item} onOpenRecipe={onOpenRecipe} />
-                  ))}
-                </div>
-              ) : (
-                <p>本轮没有引用到可展示的条目。</p>
-              )}
-            </section>
+                <section className="detail-section">
+                  <h3>本轮引用</h3>
+                  {llmResult.citations?.length ? (
+                    <div className="recipe-list ai-result-list">
+                      {llmResult.citations.map((item) => (
+                        <RecipeRefCard key={`citation-${item.id}-${item.source || "citation"}`} item={item} onOpenRecipe={onOpenRecipe} />
+                      ))}
+                    </div>
+                  ) : (
+                    <p>本轮没有引用到可展示的条目。</p>
+                  )}
+                </section>
+              </>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -494,7 +649,7 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Natural search</p>
+            <p className="eyebrow">Natural Search</p>
             <h2>自然语言搜索</h2>
           </div>
         </div>
@@ -624,7 +779,7 @@ export default function AITools({ selectedRecipe, selectedRecipeId, onOpenRecipe
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Tag suggestion</p>
+            <p className="eyebrow">Tag Suggestion</p>
             <h2>自动标签建议</h2>
           </div>
         </div>

@@ -17,12 +17,27 @@ from app.services.import_refine_service import (
     resume_refine_run,
     start_refine_run,
 )
+from app.services.refine_review_service import (
+    get_refine_review_detail,
+    list_refine_review_items,
+    rerun_refine_recipe,
+    update_refine_review,
+)
 
 
 router = APIRouter()
 
 
 class ImportRefineStartPayload(BaseModel):
+    model: Optional[str] = None
+
+
+class RefineReviewUpdatePayload(BaseModel):
+    status: str
+    note: Optional[str] = None
+
+
+class RefineReviewRerunPayload(BaseModel):
     model: Optional[str] = None
 
 
@@ -97,6 +112,41 @@ def import_refine_resume():
         return resume_refine_run()
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/imports/refine/review")
+def import_refine_review_list(
+    search: Optional[str] = None,
+    status: str = "all",
+    limit: int = 200,
+):
+    return list_refine_review_items(search=search, status=status, limit=limit)
+
+
+@router.get("/imports/refine/review/{recipe_id}")
+def import_refine_review_detail(recipe_id: int):
+    detail = get_refine_review_detail(recipe_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return detail
+
+
+@router.put("/imports/refine/review/{recipe_id}")
+def import_refine_review_update(recipe_id: int, payload: RefineReviewUpdatePayload):
+    try:
+        return update_refine_review(recipe_id=recipe_id, status=payload.status, note=payload.note)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/imports/refine/review/{recipe_id}/rerun")
+def import_refine_review_rerun(recipe_id: int, payload: RefineReviewRerunPayload):
+    try:
+        return rerun_refine_recipe(recipe_id=recipe_id, model=payload.model)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Failed to rerun refine: {error}") from error
 
 
 def _parse_mapping_json(mapping_json: Optional[str]) -> Optional[Dict[str, str]]:

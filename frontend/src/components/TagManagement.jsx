@@ -3,7 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import {
   createManagedTag,
   deleteManagedTag,
+  deleteManagedTagRecipe,
   fetchLlmModels,
+  fetchManagedTagRecipes,
   fetchManagedTags,
   fetchTaggingStatus,
   pauseTaggingRun,
@@ -19,7 +21,7 @@ const EMPTY_FORM = {
   sort_order: 0
 };
 
-export default function TagManagement() {
+export default function TagManagement({ onOpenRecipe }) {
   const [tags, setTags] = useState([]);
   const [runStatus, setRunStatus] = useState(null);
   const [models, setModels] = useState([]);
@@ -30,6 +32,11 @@ export default function TagManagement() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+
+  const [selectedReviewTagId, setSelectedReviewTagId] = useState(null);
+  const [reviewSearch, setReviewSearch] = useState("");
+  const [reviewData, setReviewData] = useState(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -46,10 +53,12 @@ export default function TagManagement() {
           return;
         }
 
-        setTags(tagData.items || []);
+        const tagItems = tagData.items || [];
+        setTags(tagItems);
         setRunStatus(statusData.run || null);
         setModels(modelData.items || []);
         setSelectedModel((current) => current || modelData.items?.[0]?.name || "");
+        setSelectedReviewTagId((current) => current || tagItems[0]?.id || null);
       } catch (requestError) {
         if (active) {
           setError(requestError.message);
@@ -83,10 +92,50 @@ export default function TagManagement() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    async function loadReviewData() {
+      if (!selectedReviewTagId) {
+        setReviewData(null);
+        return;
+      }
+
+      setReviewLoading(true);
+      try {
+        const result = await fetchManagedTagRecipes(selectedReviewTagId, {
+          search: reviewSearch,
+          limit: 100
+        });
+        if (active) {
+          setReviewData(result);
+        }
+      } catch (requestError) {
+        if (active) {
+          setError(requestError.message);
+        }
+      } finally {
+        if (active) {
+          setReviewLoading(false);
+        }
+      }
+    }
+
+    loadReviewData();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedReviewTagId, reviewSearch]);
+
   async function refreshAll() {
     const [tagData, statusData] = await Promise.all([fetchManagedTags(), fetchTaggingStatus()]);
-    setTags(tagData.items || []);
+    const tagItems = tagData.items || [];
+    setTags(tagItems);
     setRunStatus(statusData.run || null);
+    if (!tagItems.some((item) => item.id === selectedReviewTagId)) {
+      setSelectedReviewTagId(tagItems[0]?.id || null);
+    }
   }
 
   function resetForm() {
@@ -157,7 +206,7 @@ export default function TagManagement() {
     try {
       const result = await startTaggingRun(selectedModel || undefined);
       setRunStatus(result.run || null);
-      setMessage("本地 AI 打标签任务已启动。");
+      setMessage("本地 AI 自动标签任务已启动。");
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -197,6 +246,27 @@ export default function TagManagement() {
     }
   }
 
+  async function handleRemoveAssignment(tagId, recipeId) {
+    setWorking(true);
+    setError("");
+    setMessage("");
+
+    try {
+      await deleteManagedTagRecipe(tagId, recipeId);
+      const result = await fetchManagedTagRecipes(tagId, {
+        search: reviewSearch,
+        limit: 100
+      });
+      setReviewData(result);
+      await refreshAll();
+      setMessage("已移除该菜谱的自动标签。");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setWorking(false);
+    }
+  }
+
   const progressText = useMemo(() => {
     if (!runStatus) {
       return "0 / 0";
@@ -212,7 +282,7 @@ export default function TagManagement() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Managed tags</p>
+            <p className="eyebrow">Managed Tags</p>
             <h2>标签管理</h2>
           </div>
         </div>
@@ -259,7 +329,7 @@ export default function TagManagement() {
 
         <div className="action-row">
           <button type="button" className="action-button" onClick={handleStartRun} disabled={working}>
-            启动本地 AI 打标签
+            启动本地 AI 自动标签
           </button>
           <button
             type="button"
@@ -290,7 +360,7 @@ export default function TagManagement() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Tag catalog</p>
+            <p className="eyebrow">Tag Catalog</p>
             <h2>{editingTagId ? "编辑标签" : "新增标签"}</h2>
           </div>
         </div>
@@ -353,7 +423,7 @@ export default function TagManagement() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Existing tags</p>
+            <p className="eyebrow">Existing Tags</p>
             <h2>现有标签</h2>
           </div>
         </div>
@@ -386,6 +456,14 @@ export default function TagManagement() {
                   <button
                     type="button"
                     className="action-button secondary"
+                    onClick={() => setSelectedReviewTagId(tag.id)}
+                    disabled={working}
+                  >
+                    查看命中
+                  </button>
+                  <button
+                    type="button"
+                    className="action-button secondary"
                     onClick={() => removeTag(tag.id)}
                     disabled={working}
                   >
@@ -395,6 +473,102 @@ export default function TagManagement() {
               </article>
             ))}
           </div>
+        ) : null}
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Tag Review</p>
+            <h2>标签命中审核</h2>
+          </div>
+        </div>
+
+        <div className="filter-bar">
+          <label className="filter-shell">
+            <span>标签</span>
+            <select
+              value={selectedReviewTagId ?? ""}
+              onChange={(event) => setSelectedReviewTagId(event.target.value ? Number(event.target.value) : null)}
+            >
+              <option value="">请选择标签</option>
+              {tags.map((tag) => (
+                <option key={tag.id} value={tag.id}>
+                  {tag.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="search-shell">
+            <span>搜索命中菜谱</span>
+            <input value={reviewSearch} onChange={(event) => setReviewSearch(event.target.value)} />
+          </label>
+        </div>
+
+        {reviewData?.tag ? (
+          <div className="detail-grid detail-grid-wide">
+            <div className="detail-stat">
+              <span>当前标签</span>
+              <strong>{reviewData.tag.name}</strong>
+            </div>
+            <div className="detail-stat">
+              <span>命中条数</span>
+              <strong>{reviewData.items.length}</strong>
+            </div>
+            <div className="detail-stat">
+              <span>状态</span>
+              <strong>{reviewData.tag.is_active ? "启用" : "停用"}</strong>
+            </div>
+          </div>
+        ) : null}
+
+        {reviewLoading ? <p>加载中...</p> : null}
+        {!reviewLoading && reviewData?.items?.length ? (
+          <div className="section-stack">
+            {reviewData.items.map((item) => (
+              <article key={`${item.recipe_id}-${reviewData.tag.id}`} className="history-card">
+                <div className="panel-header">
+                  <div>
+                    <h3>{item.name}</h3>
+                    <p className="recipe-meta">
+                      {[item.library_section, item.section_name].filter(Boolean).join(" / ") || "未归类"}
+                    </p>
+                  </div>
+                  <div className="tag-row compact-tag-row">
+                    {typeof item.confidence === "number" ? (
+                      <span className="tag muted">{Math.round(item.confidence * 100)}%</span>
+                    ) : null}
+                    {item.updated_at ? <span className="tag muted">{item.updated_at}</span> : null}
+                  </div>
+                </div>
+                {item.reason ? <p className="recipe-meta">{item.reason}</p> : null}
+                <div className="action-row">
+                  {onOpenRecipe ? (
+                    <button
+                      type="button"
+                      className="action-button secondary"
+                      onClick={() => onOpenRecipe(item.recipe_id)}
+                      disabled={working}
+                    >
+                      打开菜谱
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="action-button secondary"
+                    onClick={() => handleRemoveAssignment(reviewData.tag.id, item.recipe_id)}
+                    disabled={working}
+                  >
+                    移除关联
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : null}
+
+        {!reviewLoading && selectedReviewTagId && reviewData && reviewData.items.length === 0 ? (
+          <p>当前标签没有命中记录。</p>
         ) : null}
       </section>
     </div>
