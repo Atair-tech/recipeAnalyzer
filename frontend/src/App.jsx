@@ -3,6 +3,7 @@ import { startTransition, useDeferredValue, useEffect, useState } from "react";
 import AnalyticsDashboard from "./components/AnalyticsDashboard";
 import AiLogViewer from "./components/AiLogViewer";
 import AITools from "./components/AITools";
+import BirthdaySurprise from "./components/BirthdaySurprise";
 import DatabaseBrowser from "./components/DatabaseBrowser";
 import ImportHistory from "./components/ImportHistory";
 import ImportRefinementPanel from "./components/ImportRefinementPanel";
@@ -10,10 +11,19 @@ import ImportWorkspace from "./components/ImportWorkspace";
 import PairingReview from "./components/PairingReview";
 import RefineReview from "./components/RefineReview";
 import RecipeDetail from "./components/RecipeDetail";
+import RecipeEditor from "./components/RecipeEditor";
 import RecipeList from "./components/RecipeList";
 import Sidebar from "./components/Sidebar";
 import TagManagement from "./components/TagManagement";
-import { fetchHealth, fetchOverview, fetchRecipe, fetchRecipeFilters, fetchRecipes } from "./lib/api";
+import {
+  acknowledgeBirthdaySurpriseEvent,
+  fetchBirthdaySurpriseEvent,
+  fetchHealth,
+  fetchOverview,
+  fetchRecipe,
+  fetchRecipeFilters,
+  fetchRecipes
+} from "./lib/api";
 
 function intersectOptions(primaryOptions, allowedOptions) {
   if (!allowedOptions || allowedOptions.length === 0) {
@@ -23,62 +33,30 @@ function intersectOptions(primaryOptions, allowedOptions) {
   return primaryOptions.filter((option) => allowedSet.has(option));
 }
 
-function OverviewSection({ overview }) {
-  const cards = [
-    {
-      label: "正式菜谱",
-      value: overview?.recipe_count ?? 0,
-      note: "来自索引页、做法页和甜点页的正式记录"
-    },
-    {
-      label: "待办项",
-      value: overview?.backlog_count ?? 0,
-      note: "来源于“再挑战及待记录”工作表"
-    },
-    {
-      label: "专题库",
-      value: overview?.library_section_count ?? 0,
-      note: "顶层专题维度，例如牛肉、海鲜、早餐等"
-    }
-  ];
-
+function StartupGate({ open, onOpen, onDisable }) {
   return (
-    <section className="panel overview-panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">System overview</p>
-          <h2>工作簿驱动的本地菜谱库</h2>
-        </div>
-      </div>
-
-      <div className="overview-grid">
-        {cards.map((card) => (
-          <article key={card.label} className="overview-card">
-            <span>{card.label}</span>
-            <strong>{card.value}</strong>
-            <p>{card.note}</p>
-          </article>
-        ))}
-      </div>
-
-      <div className="timeline-card">
-        <div>
-          <span className="eyebrow">最近更新</span>
-          <h3>{overview?.latest_recipe_name ?? "尚未导入真实菜谱"}</h3>
-        </div>
-        <p>{overview?.latest_updated_at ?? "导入后这里会显示最近一次更新的记录。"}</p>
-      </div>
-
-      <div className="callout-card">
-        <h3>当前设计原则</h3>
-        <p>界面围绕真实工作簿的信息结构展示：专题库、分组、菜系、食材、做法和待办状态都会直接入库并参与检索。</p>
-      </div>
-    </section>
+    <div className={`startup-gate ${open ? "open" : ""}`} aria-hidden={open ? "true" : "false"}>
+      <button type="button" className="startup-gate-core" onClick={onOpen}>
+        <img className="startup-gate-image" src="/resource/birthday-table.png" alt="" />
+      </button>
+      <button type="button" className="startup-gate-skip" onClick={onDisable}>
+        以后不再显示
+      </button>
+    </div>
   );
 }
 
 export default function App() {
-  const [selectedSection, setSelectedSection] = useState("overview");
+  const [routeHash, setRouteHash] = useState(() => window.location.hash);
+  const [showStartupGate, setShowStartupGate] = useState(() => {
+    try {
+      return window.localStorage.getItem("recipeAnalyzer.startupGateDisabled") !== "1";
+    } catch {
+      return true;
+    }
+  });
+  const [startupGateOpen, setStartupGateOpen] = useState(false);
+  const [selectedSection, setSelectedSection] = useState("analytics");
   const [health, setHealth] = useState(null);
   const [overview, setOverview] = useState(null);
   const [recipes, setRecipes] = useState([]);
@@ -108,6 +86,79 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    function handleHashChange() {
+      setRouteHash(window.location.hash);
+    }
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
+
+  useEffect(() => {
+    if (routeHash === "#birthday") {
+      return;
+    }
+    try {
+      if (window.sessionStorage.getItem("recipeAnalyzer.forceStartupGate") === "1") {
+        window.sessionStorage.removeItem("recipeAnalyzer.forceStartupGate");
+        setStartupGateOpen(false);
+        setShowStartupGate(true);
+      }
+    } catch {
+      // Ignore storage failures; normal startup behavior still works.
+    }
+  }, [routeHash]);
+
+  useEffect(() => {
+    let active = true;
+    let timerId = null;
+
+    async function checkBirthdayEvent() {
+      try {
+        const event = await fetchBirthdaySurpriseEvent();
+        if (!active) {
+          return;
+        }
+        if (event.pending && event.route === "birthday" && event.event_id) {
+          window.location.hash = "birthday";
+          acknowledgeBirthdaySurpriseEvent(event.event_id).catch(() => {});
+        }
+      } catch {
+        // The desktop backend may still be starting; the next poll will retry.
+      } finally {
+        if (active) {
+          timerId = window.setTimeout(checkBirthdayEvent, 2000);
+        }
+      }
+    }
+
+    checkBirthdayEvent();
+
+    return () => {
+      active = false;
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, []);
+
+  const startupGateVisible = showStartupGate && routeHash !== "#birthday";
+
+  function openStartupGate({ disableFuture = false } = {}) {
+    if (startupGateOpen) {
+      return;
+    }
+    if (disableFuture) {
+      try {
+        window.localStorage.setItem("recipeAnalyzer.startupGateDisabled", "1");
+      } catch {
+        // Ignore storage failures; the gate still opens normally.
+      }
+    }
+    setStartupGateOpen(true);
+    window.setTimeout(() => setShowStartupGate(false), 420);
+  }
 
   const deferredSearch = useDeferredValue(search);
   const allowedSectionNames = selectedLibrarySection
@@ -266,8 +317,24 @@ export default function App() {
     };
   }, [selectedRecipeId]);
 
+  if (routeHash === "#editor") {
+    return <RecipeEditor />;
+  }
+
+  if (routeHash === "#birthday") {
+    return <BirthdaySurprise />;
+  }
+
   return (
     <div className="app-shell">
+      {startupGateVisible ? (
+        <StartupGate
+          open={startupGateOpen}
+          onOpen={() => openStartupGate()}
+          onDisable={() => openStartupGate({ disableFuture: true })}
+        />
+      ) : null}
+
       <Sidebar
         health={health}
         overview={overview}
@@ -278,7 +345,6 @@ export default function App() {
       <main className="workspace">
         {error ? <div className="error-banner">{error}</div> : null}
 
-        {selectedSection === "overview" ? <OverviewSection overview={overview} /> : null}
 
         {selectedSection === "recipes" ? (
           <div className="content-grid">
@@ -349,10 +415,11 @@ export default function App() {
                 setReloadToken((current) => current + 1);
               }}
             />
-            <ImportRefinementPanel />
             <ImportHistory reloadToken={reloadToken} />
           </div>
         ) : null}
+
+        {selectedSection === "ingredientAnalysis" ? <ImportRefinementPanel /> : null}
 
         {selectedSection === "pairing" ? <PairingReview reloadToken={reloadToken} /> : null}
 
@@ -373,16 +440,14 @@ export default function App() {
           />
         ) : null}
 
-        {selectedSection === "ai" ? (
+        <div className={selectedSection === "ai" ? "preserved-section" : "preserved-section preserved-section-hidden"}>
           <AITools
-            selectedRecipe={selectedRecipe}
-            selectedRecipeId={selectedRecipeId}
             onOpenRecipe={(recipeId) => {
               setSelectedRecipeId(recipeId);
               setSelectedSection("recipes");
             }}
           />
-        ) : null}
+        </div>
       </main>
     </div>
   );

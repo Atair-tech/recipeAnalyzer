@@ -3,6 +3,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.env import load_local_env
+
+load_local_env()
+
 from app.api.routes.ai import router as ai_router
 from app.api.routes.analytics import router as analytics_router
 from app.api.routes.database import router as database_router
@@ -13,6 +17,7 @@ from app.api.routes.system import router as system_router
 from app.api.routes.tagging import router as tagging_router
 from app.core.config import ALLOWED_ORIGINS
 from app.db.database import initialize_database
+from app.services.birthday_surprise_service import start_birthday_surprise_scheduler
 from app.services.search_service import rebuild_recipe_search_index
 
 
@@ -20,6 +25,7 @@ from app.services.search_service import rebuild_recipe_search_index
 async def lifespan(_: FastAPI):
     initialize_database()
     rebuild_recipe_search_index()
+    start_birthday_surprise_scheduler()
     yield
 
 

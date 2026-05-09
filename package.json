@@ -1,0 +1,17 @@
+{
+  "name": "recipe-analyzer-desktop",
+  "private": true,
+  "version": "0.1.21",
+  "scripts": {
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "sidecar:build": "desktop\\tauri_backend\\build_backend_sidecar.bat",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "desktop:build": "npm run sidecar:build && npm run tauri:build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1"
+  }
+}
+

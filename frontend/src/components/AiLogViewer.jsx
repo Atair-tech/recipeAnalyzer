@@ -6,7 +6,7 @@ const FEATURE_OPTIONS = [
   { value: "", label: "全部" },
   { value: "assistant_chat", label: "AI 问答" },
   { value: "managed_tagging", label: "自动标签" },
-  { value: "import_refinement", label: "AI 精校" }
+  { value: "import_refinement", label: "step1 本地AI分析食材" }
 ];
 
 const STATUS_OPTIONS = [
@@ -21,6 +21,10 @@ function formatTitle(item) {
     parts.push(item.recipe_name);
   }
   return parts.filter(Boolean).join(" / ");
+}
+
+function replayBirthdayAnimation() {
+  window.location.hash = "birthday";
 }
 
 export default function AiLogViewer() {
@@ -112,6 +116,9 @@ export default function AiLogViewer() {
           <p className="eyebrow">AI logs</p>
           <h2>AI 对话记录</h2>
         </div>
+        <button type="button" className="action-button secondary" onClick={replayBirthdayAnimation}>
+          重播生日动画
+        </button>
       </div>
 
       <div className="filter-bar analytics-filter-bar">

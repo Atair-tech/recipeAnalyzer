@@ -14,11 +14,42 @@ from app.services.recipe_service import get_recipe
 
 
 VALID_REVIEW_STATUSES = {"approved", "issue"}
+VALID_ISSUE_TYPES = {"model_empty", "model_format", "postprocess_strict", "source_dirty", "unknown"}
+
+
+def _normalize_issue_type(issue_type: Optional[str]) -> Optional[str]:
+    value = (issue_type or "").strip().lower() or None
+    if value is None:
+        return None
+    if value not in VALID_ISSUE_TYPES:
+        raise ValueError("Invalid issue type")
+    return value
+
+
+def _infer_issue_type(last_error: Optional[str], last_raw_response: Optional[str], ingredients_text: Optional[str]) -> Optional[str]:
+    error_text = (last_error or "").strip()
+    raw_text = (last_raw_response or "").strip()
+    source_text = (ingredients_text or "").strip()
+    if not error_text:
+        return None
+    if "JSON" in error_text or "json" in error_text:
+        return "model_format"
+    if "no usable ingredient entities" in error_text:
+        if raw_text.startswith("{") or raw_text.startswith("["):
+            return "postprocess_strict"
+        if len(source_text) <= 12 and not any(mark in source_text for mark in ("（", "(", "：", ":", "，", ",")):
+            return "model_empty"
+        if any(token in source_text for token in ("推荐", "可用", "最好", "或者", "也可", "做法", "含水量", "口味", "铺底")):
+            return "source_dirty"
+        if raw_text:
+            return "model_format"
+    return "unknown"
 
 
 def list_refine_review_items(
     search: Optional[str] = None,
     status: str = "all",
+    issue_type: Optional[str] = None,
     limit: int = 200,
 ) -> Dict[str, Any]:
     where_clauses = ["r.record_kind = 'recipe'"]
@@ -46,6 +77,11 @@ def list_refine_review_items(
     elif status == "error":
         where_clauses.append("rs.last_error IS NOT NULL AND TRIM(rs.last_error) <> ''")
 
+    normalized_issue_type = _normalize_issue_type(issue_type)
+    if normalized_issue_type:
+        where_clauses.append("rr.issue_type = ?")
+        params.append(normalized_issue_type)
+
     params.append(limit)
 
     query = f"""
@@ -59,7 +95,9 @@ def list_refine_review_items(
             rs.refine_version,
             rs.refined_at,
             rs.last_error,
+            rs.last_raw_response,
             rr.status AS review_status,
+            rr.issue_type AS review_issue_type,
             rr.note AS review_note,
             rr.updated_at AS review_updated_at,
             COUNT(ri.id) AS ingredient_count
@@ -78,7 +116,9 @@ def list_refine_review_items(
             rs.refine_version,
             rs.refined_at,
             rs.last_error,
+            rs.last_raw_response,
             rr.status,
+            rr.issue_type,
             rr.note,
             rr.updated_at
         ORDER BY
@@ -109,6 +149,10 @@ def list_refine_review_items(
                 "refine_version": row["refine_version"],
                 "refined_at": row["refined_at"],
                 "last_error": row["last_error"],
+                "last_raw_response": row["last_raw_response"],
+                "issue_type": row["review_issue_type"] or _infer_issue_type(
+                    row["last_error"], row["last_raw_response"], None
+                ),
                 "review_status": row["review_status"] or "pending",
                 "review_note": row["review_note"],
                 "review_updated_at": row["review_updated_at"],
@@ -126,7 +170,7 @@ def get_refine_review_detail(recipe_id: int) -> Optional[Dict[str, Any]]:
     with get_connection() as connection:
         refine_state = connection.execute(
             """
-            SELECT recipe_id, source_hash, model, refine_version, refined_at, last_run_id, last_error
+            SELECT recipe_id, source_hash, model, refine_version, refined_at, last_run_id, last_error, last_raw_response
             FROM recipe_ai_refine_state
             WHERE recipe_id = ?
             """,
@@ -134,7 +178,7 @@ def get_refine_review_detail(recipe_id: int) -> Optional[Dict[str, Any]]:
         ).fetchone()
         review_state = connection.execute(
             """
-            SELECT recipe_id, status, note, updated_at
+            SELECT recipe_id, status, issue_type, note, updated_at
             FROM recipe_refine_reviews
             WHERE recipe_id = ?
             """,
@@ -161,6 +205,11 @@ def get_refine_review_detail(recipe_id: int) -> Optional[Dict[str, Any]]:
     return {
         "recipe": recipe,
         "refine_state": dict(refine_state) if refine_state is not None else None,
+        "derived_issue_type": _infer_issue_type(
+            refine_state["last_error"] if refine_state is not None else None,
+            refine_state["last_raw_response"] if refine_state is not None else None,
+            recipe.get("ingredients_text"),
+        ),
         "snapshot": (
             {
                 "id": snapshot_row["id"],
@@ -177,12 +226,14 @@ def get_refine_review_detail(recipe_id: int) -> Optional[Dict[str, Any]]:
         "review": (
             {
                 "status": review_state["status"],
+                "issue_type": review_state["issue_type"],
                 "note": review_state["note"],
                 "updated_at": review_state["updated_at"],
             }
             if review_state is not None
             else {
                 "status": "pending",
+                "issue_type": None,
                 "note": "",
                 "updated_at": None,
             }
@@ -190,12 +241,18 @@ def get_refine_review_detail(recipe_id: int) -> Optional[Dict[str, Any]]:
     }
 
 
-def update_refine_review(recipe_id: int, status: str, note: Optional[str] = None) -> Dict[str, Any]:
+def update_refine_review(
+    recipe_id: int,
+    status: str,
+    note: Optional[str] = None,
+    issue_type: Optional[str] = None,
+) -> Dict[str, Any]:
     normalized_status = (status or "").strip().lower()
     if normalized_status not in VALID_REVIEW_STATUSES:
         raise ValueError("Invalid review status")
 
     normalized_note = (note or "").strip() or None
+    normalized_issue_type = _normalize_issue_type(issue_type) if normalized_status == "issue" else None
 
     with get_connection() as connection:
         recipe_exists = connection.execute("SELECT 1 FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
@@ -204,14 +261,15 @@ def update_refine_review(recipe_id: int, status: str, note: Optional[str] = None
 
         connection.execute(
             """
-            INSERT INTO recipe_refine_reviews (recipe_id, status, note, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO recipe_refine_reviews (recipe_id, status, issue_type, note, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(recipe_id) DO UPDATE SET
                 status = excluded.status,
+                issue_type = excluded.issue_type,
                 note = excluded.note,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (recipe_id, normalized_status, normalized_note),
+            (recipe_id, normalized_status, normalized_issue_type, normalized_note),
         )
         connection.commit()
 
@@ -259,16 +317,18 @@ def rerun_refine_recipe(recipe_id: int, model: Optional[str] = None) -> Dict[str
                 refine_version,
                 refined_at,
                 last_run_id,
-                last_error
+                last_error,
+                last_raw_response
             )
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, NULL)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, NULL, NULL)
             ON CONFLICT(recipe_id) DO UPDATE SET
                 source_hash = excluded.source_hash,
                 model = excluded.model,
                 refine_version = excluded.refine_version,
                 refined_at = CURRENT_TIMESTAMP,
                 last_run_id = NULL,
-                last_error = NULL
+                last_error = NULL,
+                last_raw_response = NULL
             """,
             (recipe_id, source_hash, model_name, refine_version),
         )

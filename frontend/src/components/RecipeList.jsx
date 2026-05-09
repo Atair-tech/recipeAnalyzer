@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { exportRecipes } from "../lib/api";
 
@@ -26,6 +26,74 @@ function toggleManagedTag(selectedTags, targetTag) {
     return selectedTags.filter((item) => item !== targetTag);
   }
   return [...selectedTags, targetTag];
+}
+
+function IngredientSearchFilter({ value, options, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selectedLabel = value || "全部";
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredOptions = useMemo(() => {
+    if (!normalizedQuery) {
+      return options;
+    }
+    return options.filter((option) => option.toLowerCase().includes(normalizedQuery));
+  }, [normalizedQuery, options]);
+
+  function selectOption(nextValue) {
+    onChange(nextValue);
+    setOpen(false);
+    setQuery("");
+  }
+
+  return (
+    <div className="filter-shell ingredient-search-filter">
+      <span>食材</span>
+      <button
+        type="button"
+        className="ingredient-search-trigger"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+      >
+        <span>{selectedLabel}</span>
+        <span>{open ? "▲" : "▼"}</span>
+      </button>
+      {open ? (
+        <div className="ingredient-search-panel">
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索食材"
+            autoFocus
+          />
+          <button
+            type="button"
+            className={value ? "ingredient-search-option" : "ingredient-search-option active"}
+            onClick={() => selectOption("")}
+          >
+            全部
+          </button>
+          <div className="ingredient-search-options">
+            {filteredOptions.length === 0 ? (
+              <p className="ingredient-search-empty">没有匹配食材</p>
+            ) : (
+              filteredOptions.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  className={value === option ? "ingredient-search-option active" : "ingredient-search-option"}
+                  onClick={() => selectOption(option)}
+                >
+                  {option}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export default function RecipeList({
@@ -67,21 +135,19 @@ export default function RecipeList({
         <div className="results-chip">{loading ? "加载中..." : `${recipes.length} 条`}</div>
       </div>
 
-      <label className="search-shell" htmlFor="recipe-search">
-        <span>关键词搜索</span>
-        <input
-          id="recipe-search"
-          name="recipe-search"
-          type="search"
-          placeholder="搜索菜名、专题库、分组、做法或备注"
-          value={search}
-          onChange={(event) => onSearchChange(event.target.value)}
-        />
-      </label>
-
       <section className="filter-card">
-        <div className="filter-card-header">
-          <div className="filter-inline-label">筛选</div>
+        <div className="filter-primary-row">
+          <label className="search-shell compact-search-shell" htmlFor="recipe-search">
+            <span>关键词搜索</span>
+            <input
+              id="recipe-search"
+              name="recipe-search"
+              type="search"
+              placeholder="搜索专题库、分组、做法或备注"
+              value={search}
+              onChange={(event) => onSearchChange(event.target.value)}
+            />
+          </label>
 
           <div className="filter-card-actions">
             <button
@@ -121,6 +187,7 @@ export default function RecipeList({
 
         {showFilters ? (
           <>
+            <div className="filter-inline-label">筛选条件</div>
             <div className="filter-panel-grid">
               <label className="filter-shell" htmlFor="status-filter">
                 <span>类型</span>
@@ -172,61 +239,57 @@ export default function RecipeList({
                 </select>
               </label>
 
-              <label className="filter-shell" htmlFor="ingredient-filter">
-                <span>食材</span>
-                <select id="ingredient-filter" value={ingredient} onChange={(event) => onIngredientChange(event.target.value)}>
-                  <option value="">全部</option>
-                  {filterOptions.ingredients.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <IngredientSearchFilter
+                value={ingredient}
+                options={filterOptions.ingredients}
+                onChange={onIngredientChange}
+              />
             </div>
 
-            <section className="filter-checkbox-card">
-              <button
-                type="button"
-                className="filter-dropdown-trigger"
-                onClick={() => setShowManagedTagDropdown((current) => !current)}
-                aria-expanded={showManagedTagDropdown}
-              >
-                <span>自动标签</span>
-                <span className="filter-checkbox-summary">
-                  {managedTags.length > 0 ? `已选 ${managedTags.length} 项，需全部命中` : "未选择"}
-                </span>
-                <span className="filter-dropdown-arrow">{showManagedTagDropdown ? "▲" : "▼"}</span>
-              </button>
+            <div className="filter-secondary-row">
+              <section className="filter-checkbox-card">
+                <button
+                  type="button"
+                  className="filter-dropdown-trigger"
+                  onClick={() => setShowManagedTagDropdown((current) => !current)}
+                  aria-expanded={showManagedTagDropdown}
+                >
+                  <span>自动标签</span>
+                  <span className="filter-checkbox-summary">
+                    {managedTags.length > 0 ? `已选 ${managedTags.length} 项，需全部命中` : "未选择"}
+                  </span>
+                  <span className="filter-dropdown-arrow">{showManagedTagDropdown ? "▲" : "▼"}</span>
+                </button>
 
-              {showManagedTagDropdown ? (
-                <div className="filter-dropdown-panel">
-                  <div className="checkbox-grid">
-                    {filterOptions.managed_tags.map((option) => (
-                      <label key={option} className="checkbox-chip">
-                        <input
-                          type="checkbox"
-                          checked={managedTags.includes(option)}
-                          onChange={() => onManagedTagsChange(toggleManagedTag(managedTags, option))}
-                        />
-                        <span>{option}</span>
-                      </label>
-                    ))}
+                {showManagedTagDropdown ? (
+                  <div className="filter-dropdown-panel">
+                    <div className="checkbox-grid">
+                      {filterOptions.managed_tags.map((option) => (
+                        <label key={option} className="checkbox-chip">
+                          <input
+                            type="checkbox"
+                            checked={managedTags.includes(option)}
+                            onChange={() => onManagedTagsChange(toggleManagedTag(managedTags, option))}
+                          />
+                          <span>{option}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ) : null}
-            </section>
+                ) : null}
+              </section>
 
-            <div className="filter-toggle-row">
-              <label className="toggle-shell">
-                <input type="checkbox" checked={bmdOnly} onChange={(event) => onBmdOnlyChange(event.target.checked)} />
-                <span>BMD</span>
-              </label>
+              <div className="filter-toggle-row">
+                <label className="toggle-shell">
+                  <input type="checkbox" checked={bmdOnly} onChange={(event) => onBmdOnlyChange(event.target.checked)} />
+                  <span>BMD</span>
+                </label>
 
-              <label className="toggle-shell">
-                <input type="checkbox" checked={ccOnly} onChange={(event) => onCcOnlyChange(event.target.checked)} />
-                <span>CC</span>
-              </label>
+                <label className="toggle-shell">
+                  <input type="checkbox" checked={ccOnly} onChange={(event) => onCcOnlyChange(event.target.checked)} />
+                  <span>CC</span>
+                </label>
+              </div>
             </div>
           </>
         ) : null}

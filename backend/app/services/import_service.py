@@ -2,9 +2,11 @@ import hashlib
 import json
 from typing import Any, BinaryIO, Dict, List, Optional
 
+from app.core.config import DATA_DIR
 from app.db.database import get_connection
 from app.services.ingredient_service import sync_recipe_ingredients
 from app.services.pairing_service import load_pair_overrides
+from app.services.refine_hash_service import build_refinement_source_hash, refinement_inputs_equal
 from app.services.search_service import rebuild_recipe_search_index
 from app.services.workbook_parser import (
     ParsedRecord,
@@ -29,6 +31,8 @@ IMPORT_FIELDS = [
     {"key": "steps_text", "label": "做法及要点"},
     {"key": "notes_text", "label": "系统备注"},
 ]
+
+SOURCE_WORKBOOK_FILE_NAME = "recipes.xlsx"
 
 
 def preview_import(
@@ -116,9 +120,13 @@ def persist_import(
                 stats["unchanged"] += 1
                 continue
 
+            refinement_input_changed = not refinement_inputs_equal(existing, recipe_payload)
             _update_recipe(connection, existing["id"], recipe_payload, source_key, source_hash, batch_id)
             _replace_recipe_tags(connection, existing["id"], recipe_payload["tags"])
-            sync_recipe_ingredients(connection, existing["id"], recipe_payload["ingredients_text"])
+            if refinement_input_changed:
+                sync_recipe_ingredients(connection, existing["id"], recipe_payload["ingredients_text"])
+            else:
+                _migrate_refine_state_source_hash(connection, existing["id"], recipe_payload)
             stats["updated"] += 1
 
         recipe_ids_to_delete = [
@@ -141,6 +149,8 @@ def persist_import(
 
         saved_tag_count = connection.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
 
+    _save_source_workbook(raw_bytes)
+
     return {
         "mode": "structured_workbook",
         "parser_kind": parsed["parser_kind"],
@@ -153,6 +163,11 @@ def persist_import(
         "saved_tags": saved_tag_count,
         "summary": summary,
     }
+
+
+def _save_source_workbook(raw_bytes: bytes) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / SOURCE_WORKBOOK_FILE_NAME).write_bytes(raw_bytes)
 
 
 def list_import_batches(limit: int = 20) -> Dict[str, Any]:
@@ -306,7 +321,12 @@ def _load_existing_recipes(connection) -> Dict[str, Dict[str, Any]]:
         SELECT
             id,
             COALESCE(NULLIF(TRIM(source_key), ''), NULLIF(TRIM(name), '')) AS effective_source_key,
-            source_hash
+            source_hash,
+            name,
+            library_section,
+            section_name,
+            ingredients_text,
+            seasonings_text
         FROM recipes
         ORDER BY id DESC
         """
@@ -320,6 +340,11 @@ def _load_existing_recipes(connection) -> Dict[str, Dict[str, Any]]:
         existing[source_key] = {
             "id": row["id"],
             "source_hash": row["source_hash"],
+            "name": row["name"],
+            "library_section": row["library_section"],
+            "section_name": row["section_name"],
+            "ingredients_text": row["ingredients_text"],
+            "seasonings_text": row["seasonings_text"],
         }
 
     return existing
@@ -364,17 +389,11 @@ def _insert_recipe(connection, recipe_payload: Dict[str, Any], source_key: str, 
             source_key,
             source_hash,
             last_import_batch_id,
-            alias,
             library_section,
             section_name,
             category,
             cuisine,
             sub_cuisine,
-            flavor,
-            difficulty,
-            estimated_time,
-            servings,
-            tools,
             ingredients_text,
             seasonings_text,
             steps_text,
@@ -385,7 +404,7 @@ def _insert_recipe(connection, recipe_payload: Dict[str, Any], source_key: str, 
             cc_flag,
             source_text
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             recipe_payload["name"],
@@ -394,17 +413,11 @@ def _insert_recipe(connection, recipe_payload: Dict[str, Any], source_key: str, 
             source_key,
             source_hash,
             batch_id,
-            recipe_payload["alias"],
             recipe_payload["library_section"],
             recipe_payload["section_name"],
             recipe_payload["category"],
             recipe_payload["cuisine"],
             recipe_payload["sub_cuisine"],
-            recipe_payload["flavor"],
-            recipe_payload["difficulty"],
-            recipe_payload["estimated_time"],
-            recipe_payload["servings"],
-            recipe_payload["tools"],
             recipe_payload["ingredients_text"],
             recipe_payload["seasonings_text"],
             recipe_payload["steps_text"],
@@ -430,17 +443,11 @@ def _update_recipe(connection, recipe_id: int, recipe_payload: Dict[str, Any], s
             source_key = ?,
             source_hash = ?,
             last_import_batch_id = ?,
-            alias = ?,
             library_section = ?,
             section_name = ?,
             category = ?,
             cuisine = ?,
             sub_cuisine = ?,
-            flavor = ?,
-            difficulty = ?,
-            estimated_time = ?,
-            servings = ?,
-            tools = ?,
             ingredients_text = ?,
             seasonings_text = ?,
             steps_text = ?,
@@ -460,17 +467,11 @@ def _update_recipe(connection, recipe_id: int, recipe_payload: Dict[str, Any], s
             source_key,
             source_hash,
             batch_id,
-            recipe_payload["alias"],
             recipe_payload["library_section"],
             recipe_payload["section_name"],
             recipe_payload["category"],
             recipe_payload["cuisine"],
             recipe_payload["sub_cuisine"],
-            recipe_payload["flavor"],
-            recipe_payload["difficulty"],
-            recipe_payload["estimated_time"],
-            recipe_payload["servings"],
-            recipe_payload["tools"],
             recipe_payload["ingredients_text"],
             recipe_payload["seasonings_text"],
             recipe_payload["steps_text"],
@@ -522,6 +523,18 @@ def _build_mapped_row(recipe_payload: Dict[str, Any]) -> Dict[str, Any]:
 def _build_source_hash(recipe_payload: Dict[str, Any]) -> str:
     serialized = json.dumps(recipe_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _migrate_refine_state_source_hash(connection, recipe_id: int, recipe_payload: Dict[str, Any]) -> None:
+    connection.execute(
+        """
+        UPDATE recipe_ai_refine_state
+        SET source_hash = ?
+        WHERE recipe_id = ?
+            AND COALESCE(TRIM(last_error), '') = ''
+        """,
+        (build_refinement_source_hash(recipe_payload), recipe_id),
+    )
 
 
 def _load_tag_cache(connection) -> Dict[str, int]:

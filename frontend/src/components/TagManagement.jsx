@@ -349,6 +349,19 @@ export default function TagManagement({ onOpenRecipe }) {
           </button>
         </div>
 
+        {runStatus?.status === "running" ? (
+          <div className="running-callout" role="status" aria-live="polite">
+            <span className="running-dot" aria-hidden="true" />
+            <div>
+              <strong>自动标签任务正在后台运行</strong>
+              <p>
+                可以切换到其他页面查看菜谱；只要后端服务不关闭，任务会继续运行。关闭浏览器页面通常不影响任务，但关闭后端窗口会中断任务，
+                下次启动后会自动标记为暂停，可点击“恢复”继续。自动标签由 AI 生成，仅供筛选和推荐参考。
+              </p>
+            </div>
+          </div>
+        ) : null}
+
         {runStatus?.error_message ? (
           <section className="detail-section">
             <h3>最近错误</h3>

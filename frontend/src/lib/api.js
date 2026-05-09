@@ -1,10 +1,49 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
+const isTauriRuntime =
+  typeof window !== "undefined" &&
+  (window.__TAURI_INTERNALS__ ||
+    window.location.protocol === "tauri:" ||
+    window.location.hostname === "tauri.localhost");
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? (isTauriRuntime ? "http://127.0.0.1:8000/api" : "/api");
+const STARTUP_RETRY_ATTEMPTS = isTauriRuntime ? 20 : 1;
+const STARTUP_RETRY_DELAY_MS = 500;
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function fetchWithStartupRetry(url, options) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= STARTUP_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetch(url, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt === STARTUP_RETRY_ATTEMPTS) {
+        break;
+      }
+      await delay(STARTUP_RETRY_DELAY_MS);
+    }
+  }
+
+  throw lastError;
+}
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const response = await fetchWithStartupRetry(`${API_BASE_URL}${path}`, options);
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    let detail = "";
+    try {
+      const errorBody = await response.json();
+      detail = errorBody.detail || errorBody.message || "";
+    } catch {
+      detail = await response.text().catch(() => "");
+    }
+    throw new Error(detail ? `Request failed: ${response.status} - ${detail}` : `Request failed: ${response.status}`);
   }
 
   if (response.status === 204) {
@@ -33,8 +72,36 @@ export function fetchHealth() {
   return request("/health");
 }
 
+export function fetchDeepseekApiKeyStatus() {
+  return request("/settings/deepseek-api-key");
+}
+
+export function saveDeepseekApiKey(apiKey) {
+  return request("/settings/deepseek-api-key", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ api_key: apiKey })
+  });
+}
+
 export function fetchOverview() {
   return request("/overview");
+}
+
+export function fetchBirthdaySurpriseEvent() {
+  return request("/birthday-surprise/event");
+}
+
+export function acknowledgeBirthdaySurpriseEvent(eventId) {
+  return request("/birthday-surprise/event/ack", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ event_id: eventId })
+  });
 }
 
 export function fetchDatabaseTables() {
@@ -42,6 +109,11 @@ export function fetchDatabaseTables() {
 }
 
 export function exportDatabase() {
+  if (isTauriRuntime) {
+    return request("/database/export-to-downloads", {
+      method: "POST"
+    });
+  }
   return download("/database/export", "recipe_analyzer_backup.db");
 }
 
@@ -108,13 +180,14 @@ export function askLlm(payload) {
   });
 }
 
-export async function askLlmStream(payload, { onEvent } = {}) {
+export async function askLlmStream(payload, { onEvent, signal } = {}) {
   const response = await fetch(`${API_BASE_URL}/ai/llm/chat/stream`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal
   });
 
   if (!response.ok) {
@@ -130,6 +203,22 @@ export async function askLlmStream(payload, { onEvent } = {}) {
   let buffer = "";
   let finalResult = null;
 
+  function handleLine(line) {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line);
+    if (onEvent) {
+      onEvent(event);
+    }
+    if (event.type === "error") {
+      throw new Error(event.error || "Streaming request failed");
+    }
+    if (event.type === "final") {
+      finalResult = event.result;
+    }
+  }
+
   while (true) {
     const { value, done } = await reader.read();
     if (done) {
@@ -140,20 +229,13 @@ export async function askLlmStream(payload, { onEvent } = {}) {
     buffer = lines.pop() || "";
 
     for (const line of lines) {
-      if (!line.trim()) {
-        continue;
-      }
-      const event = JSON.parse(line);
-      if (onEvent) {
-        onEvent(event);
-      }
-      if (event.type === "error") {
-        throw new Error(event.error || "Streaming request failed");
-      }
-      if (event.type === "final") {
-        finalResult = event.result;
-      }
+      handleLine(line);
     }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    handleLine(buffer);
   }
 
   if (!finalResult) {
@@ -253,13 +335,16 @@ export function resumeTaggingRun() {
   });
 }
 
-export function fetchRefineReviewItems({ search = "", status = "all", limit = 200 } = {}) {
+export function fetchRefineReviewItems({ search = "", status = "all", issueType = "", limit = 200 } = {}) {
   const params = new URLSearchParams({
     status,
     limit: String(limit)
   });
   if (search) {
     params.set("search", search);
+  }
+  if (issueType) {
+    params.set("issue_type", issueType);
   }
   return request(`/imports/refine/review?${params.toString()}`);
 }
@@ -377,6 +462,34 @@ export function fetchRecipeFilters() {
   return request("/recipes/filters");
 }
 
+export function fetchRecipeEditorSchema() {
+  return request("/recipes/editor/schema");
+}
+
+export function fetchRecipeEditorRows() {
+  return request("/recipes/editor/rows");
+}
+
+export function createRecipeEditorRow(values) {
+  return request("/recipes/editor/rows", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ values })
+  });
+}
+
+export function updateRecipeEditorRow(recipeId, values) {
+  return request(`/recipes/editor/rows/${recipeId}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ values })
+  });
+}
+
 function buildImportFormData(file, mapping = null) {
   const formData = new FormData();
   formData.append("file", file);
@@ -434,6 +547,32 @@ export function pauseImportRefineRun() {
 
 export function resumeImportRefineRun() {
   return request("/imports/refine/resume", {
+    method: "POST"
+  });
+}
+
+export function fetchIngredientFilterStatus() {
+  return request("/imports/ingredient-filter/status");
+}
+
+export function startIngredientFilterRun(model, provider = "deepseek_api") {
+  return request("/imports/ingredient-filter/start", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ model, provider })
+  });
+}
+
+export function pauseIngredientFilterRun() {
+  return request("/imports/ingredient-filter/pause", {
+    method: "POST"
+  });
+}
+
+export function resumeIngredientFilterRun() {
+  return request("/imports/ingredient-filter/resume", {
     method: "POST"
   });
 }

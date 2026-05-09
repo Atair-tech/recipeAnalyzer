@@ -37,7 +37,6 @@ def rebuild_recipe_search_index(connection=None) -> None:
             SELECT
                 r.id,
                 r.name,
-                r.alias,
                 r.record_kind,
                 r.backlog_status,
                 r.library_section,
@@ -63,7 +62,6 @@ def rebuild_recipe_search_index(connection=None) -> None:
                 value
                 for value in [
                     row["name"],
-                    row["alias"],
                     row["record_kind"],
                     row["backlog_status"],
                     row["library_section"],
@@ -100,6 +98,7 @@ def natural_search(
     limit: int = 10,
     offset: int = 0,
     extra_terms: Optional[List[str]] = None,
+    structured_understanding: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized_query = (query or "").strip()
     safe_limit = max(1, min(limit, 100))
@@ -116,14 +115,19 @@ def natural_search(
 
     with get_connection() as connection:
         understanding = _understand_query(connection, normalized_query)
+        if structured_understanding:
+            understanding = _merge_structured_understanding(understanding, structured_understanding)
         if extra_terms:
-            normalized_extra_terms = [term.strip() for term in extra_terms if str(term).strip()]
-            understanding["expanded_terms"] = _dedupe_preserve_order(normalized_extra_terms)
+            normalized_extra_terms = _normalize_external_terms(extra_terms)
+            understanding["expanded_terms"] = _dedupe_preserve_order(
+                understanding.get("expanded_terms", []) + normalized_extra_terms
+            )
             understanding["free_text_terms"] = _dedupe_preserve_order(
                 understanding["free_text_terms"] + normalized_extra_terms
             )
         candidate_scores = _load_fts_candidates(connection, understanding["free_text_terms"], limit=240)
-        recipes = _load_candidate_recipes(connection, candidate_scores.keys() if candidate_scores else None)
+        candidate_ids = None if _has_structured_constraints(understanding) else candidate_scores.keys()
+        recipes = _load_candidate_recipes(connection, candidate_ids if candidate_scores else None)
 
     ranked_items = []
     for recipe in recipes:
@@ -149,6 +153,20 @@ def natural_search(
         "offset": safe_offset,
         "items": ranked_items[safe_offset : safe_offset + safe_limit],
     }
+
+
+def _has_structured_constraints(understanding: Dict[str, Any]) -> bool:
+    return any(
+        understanding.get(key)
+        for key in (
+            "library_sections",
+            "section_names",
+            "cuisines",
+            "statuses",
+            "include_ingredients",
+            "exclude_ingredients",
+        )
+    )
 
 
 def get_natural_search_export_rows(query: str) -> List[Dict[str, Any]]:
@@ -184,7 +202,54 @@ def _empty_understanding() -> Dict[str, Any]:
         "statuses": [],
         "include_ingredients": [],
         "exclude_ingredients": [],
+        "prefer_terms": [],
+        "external_source": "",
     }
+
+
+def _merge_structured_understanding(
+    base: Dict[str, Any],
+    external: Dict[str, Any],
+) -> Dict[str, Any]:
+    include_terms = _normalize_external_terms(external.get("include_terms"))
+    exclude_terms = _normalize_external_terms(external.get("exclude_terms"))
+    prefer_terms = _normalize_external_terms(external.get("prefer_terms"))
+    search_terms = _normalize_external_terms(external.get("search_terms"))
+    expanded_terms = _normalize_external_terms(external.get("expanded_terms"))
+    constraints = _normalize_external_terms(external.get("constraints"))
+
+    base["include_ingredients"] = _dedupe_preserve_order(base["include_ingredients"] + include_terms)
+    base["exclude_ingredients"] = _dedupe_preserve_order(base["exclude_ingredients"] + exclude_terms)
+    base["prefer_terms"] = _dedupe_preserve_order(base.get("prefer_terms", []) + prefer_terms)
+    base["expanded_terms"] = _dedupe_preserve_order(
+        base.get("expanded_terms", []) + expanded_terms + search_terms + prefer_terms
+    )
+    base["free_text_terms"] = _dedupe_preserve_order(
+        base["free_text_terms"] + search_terms + include_terms + prefer_terms + constraints
+    )
+    base["external_source"] = str(external.get("source") or "").strip()
+    return base
+
+
+def _normalize_external_terms(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: List[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            candidates = [
+                item.get("term"),
+                item.get("name"),
+                item.get("value"),
+                item.get("text"),
+                item.get("keyword"),
+            ]
+            text = next((str(candidate).strip() for candidate in candidates if str(candidate or "").strip()), "")
+        else:
+            text = str(item or "").strip()
+        if text:
+            normalized.append(text)
+    return _dedupe_preserve_order(normalized)
 
 
 def _understand_query(connection, query: str) -> Dict[str, Any]:
@@ -231,6 +296,24 @@ def _understand_query(connection, query: str) -> Dict[str, Any]:
             understanding["exclude_ingredients"].append(candidate)
             remaining = remaining.replace(match.group(0), " ")
 
+    if any(term in query for term in ("不辣", "不要辣", "不能辣", "别辣", "少辣")):
+        understanding["exclude_ingredients"].extend(
+            [
+                "辣",
+                "辣椒",
+                "干辣椒",
+                "小米辣",
+                "辣酱",
+                "辣油",
+                "卡宴",
+                "cayenne",
+                "冬阴功",
+                "哈里萨",
+                "harissa",
+            ]
+        )
+        remaining = re.sub(r"(不辣|不要辣|不能辣|别辣|少辣)", " ", remaining)
+
     understanding["free_text_terms"] = _extract_query_terms(remaining)
     for key in ("library_sections", "section_names", "cuisines", "statuses", "include_ingredients", "exclude_ingredients"):
         understanding[key] = _dedupe_preserve_order(understanding[key])
@@ -253,6 +336,8 @@ def _load_known_values(connection) -> Dict[str, List[str]]:
         FROM ingredients
         WHERE COALESCE(normalized_name, name) IS NOT NULL
           AND TRIM(COALESCE(normalized_name, name)) <> ''
+          AND is_visible = 1
+          AND LENGTH(TRIM(COALESCE(normalized_name, name))) >= 2
         ORDER BY ingredient_name
         """
     ).fetchall()
@@ -266,7 +351,7 @@ def _load_known_values(connection) -> Dict[str, List[str]]:
 
 def _extract_query_terms(text: str) -> List[str]:
     terms = re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]{2,}", text)
-    return _dedupe_preserve_order([term.strip() for term in terms if term.strip()])
+    return _dedupe_preserve_order([term.strip() for term in terms if term.strip() and not term.strip().isdigit()])
 
 
 def _load_fts_candidates(connection, terms: List[str], limit: int = 160) -> Dict[int, float]:
@@ -337,6 +422,7 @@ def _load_candidate_recipes(connection, candidate_ids: Optional[Set[int]]) -> Li
             COALESCE(i.normalized_name, i.name) AS ingredient_name
         FROM recipe_ingredients AS ri
         INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
+        WHERE i.is_visible = 1
         """
     ).fetchall()
 
@@ -454,6 +540,28 @@ def _rank_recipe(recipe: Dict[str, Any], understanding: Dict[str, Any], candidat
 
     if token_hits:
         reasons.append(f"文本命中：{'、'.join(_dedupe_preserve_order(token_hits))}")
+
+    prefer_hits = []
+    for term in understanding.get("prefer_terms", []):
+        term_score = 0.0
+        if term in (recipe["name"] or ""):
+            term_score += 4
+        if term in (recipe["library_section"] or "") or term in (recipe["section_name"] or ""):
+            term_score += 3
+        if term in (recipe["cuisine"] or "") or term in (recipe["sub_cuisine"] or ""):
+            term_score += 2.5
+        if term in (recipe["ingredients_text"] or "") or term in (recipe["seasonings_text"] or ""):
+            term_score += 2
+        if term in (recipe["steps_text"] or "") or term in (recipe["notes_text"] or ""):
+            term_score += 1.5
+        if term in " ".join(recipe["tags"]):
+            term_score += 2
+        if term_score > 0:
+            prefer_hits.append(term)
+            score += term_score
+
+    if prefer_hits:
+        reasons.append(f"偏好命中：{'、'.join(_dedupe_preserve_order(prefer_hits))}")
 
     if recipe["bmd_flag"]:
         score += 0.8

@@ -2,7 +2,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.services.database_browser_service import get_table_rows, list_database_tables
-from app.services.database_transfer_service import get_database_export_info, import_database_file
+from app.services.database_transfer_service import export_database_to_downloads, get_database_export_info, import_database_file
 
 
 router = APIRouter()
@@ -22,6 +22,16 @@ def export_database():
             media_type="application/x-sqlite3",
             filename=export_info["file_name"],
         )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Failed to export database: {error}") from error
+
+
+@router.post("/database/export-to-downloads")
+def export_database_file_to_downloads():
+    try:
+        return export_database_to_downloads()
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:

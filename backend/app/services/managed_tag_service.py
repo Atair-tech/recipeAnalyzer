@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -16,13 +17,48 @@ _job_state = {
     "pause_requested": False,
 }
 
+TAG_PROMPT_VERSION = "managed-tag-v6-string-array-compatible"
+MAX_TAGS_PER_RECIPE = 3
+MIN_TAG_CONFIDENCE = 0.72
+TAG_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tags": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["name", "confidence", "reason"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["tags"],
+    "additionalProperties": False,
+}
 
-def _call_ollama_chat(model_name: str, messages: List[Dict[str, str]], max_attempts: int = 2) -> str:
+
+def _call_ollama_chat(
+    model_name: str,
+    messages: List[Dict[str, str]],
+    *,
+    response_format: Optional[Any] = None,
+    max_attempts: int = 1,
+) -> str:
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            return _ollama_chat_impl(model_name, messages)
+            return _ollama_chat_impl(
+                model_name,
+                messages,
+                response_format=response_format,
+                extra_options={"temperature": 0.1, "num_ctx": 2048, "num_predict": 1536},
+            )
         except Exception as error:
             last_error = error
             if "timed out" not in str(error).lower() or attempt >= max_attempts:
@@ -324,6 +360,31 @@ def resume_tagging_run() -> Dict[str, Any]:
     return get_tagging_status()
 
 
+def _should_skip_recipe_tagging(
+    recipe_id: int,
+    source_hash: str,
+    model_name: str,
+    tag_version: str,
+) -> bool:
+    with get_connection() as connection:
+        state_row = connection.execute(
+            """
+            SELECT source_hash, model, tag_version, last_error
+            FROM recipe_ai_tag_state
+            WHERE recipe_id = ?
+            """,
+            (recipe_id,),
+        ).fetchone()
+
+    return bool(
+        state_row is not None
+        and (state_row["source_hash"] or "") == (source_hash or "")
+        and state_row["model"] == model_name
+        and state_row["tag_version"] == tag_version
+        and not (state_row["last_error"] or "").strip()
+    )
+
+
 def _run_tagging_job(run_id: int, model_name: str, tag_version: str) -> None:
     try:
         with get_connection() as connection:
@@ -336,18 +397,39 @@ def _run_tagging_job(run_id: int, model_name: str, tag_version: str) -> None:
                 ORDER BY id
                 """
             ).fetchall()
-            current_run = connection.execute(
-                "SELECT processed_count, tagged_count, skipped_count, error_count FROM ai_tagging_runs WHERE id = ?",
-                (run_id,),
-            ).fetchone()
 
-        processed_count = current_run["processed_count"] if current_run else 0
-        tagged_count = current_run["tagged_count"] if current_run else 0
-        skipped_count = current_run["skipped_count"] if current_run else 0
-        error_count = current_run["error_count"] if current_run else 0
+        pending_recipes = []
+        skipped_count = 0
+        for recipe_row in recipes:
+            recipe_id = int(recipe_row["id"])
+            source_hash = recipe_row["source_hash"] or ""
+            if _should_skip_recipe_tagging(recipe_id, source_hash, model_name, tag_version):
+                skipped_count += 1
+            else:
+                pending_recipes.append(recipe_row)
 
-        remaining_rows = recipes[processed_count:]
-        for row in remaining_rows:
+        processed_count = 0
+        tagged_count = 0
+        error_count = 0
+        with get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE ai_tagging_runs
+                SET
+                    status = 'running',
+                    total_count = ?,
+                    processed_count = ?,
+                    tagged_count = ?,
+                    skipped_count = ?,
+                    error_count = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (len(pending_recipes), processed_count, tagged_count, skipped_count, error_count, run_id),
+            )
+            connection.commit()
+
+        for row in pending_recipes:
             with _job_lock:
                 pause_requested = bool(_job_state["pause_requested"])
 
@@ -367,22 +449,7 @@ def _run_tagging_job(run_id: int, model_name: str, tag_version: str) -> None:
             recipe_id = row["id"]
             source_hash = row["source_hash"]
             try:
-                with get_connection() as connection:
-                    state_row = connection.execute(
-                        """
-                        SELECT source_hash, model, tag_version
-                        FROM recipe_ai_tag_state
-                        WHERE recipe_id = ?
-                        """,
-                        (recipe_id,),
-                    ).fetchone()
-
-                if (
-                    state_row is not None
-                    and state_row["source_hash"] == source_hash
-                    and state_row["model"] == model_name
-                    and state_row["tag_version"] == tag_version
-                ):
+                if _should_skip_recipe_tagging(recipe_id, source_hash or "", model_name, tag_version):
                     skipped_count += 1
                 else:
                     snapshot = _load_recipe_snapshot(recipe_id)
@@ -579,7 +646,14 @@ def _build_tag_version(connection) -> str:
         ORDER BY sort_order, id
         """
     ).fetchall()
-    serialized = json.dumps([dict(row) for row in rows], ensure_ascii=False, sort_keys=True)
+    serialized = json.dumps(
+        {
+            "version": TAG_PROMPT_VERSION,
+            "tags": [dict(row) for row in rows],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
@@ -773,3 +847,193 @@ def _extract_json_object(raw_text: str) -> Dict[str, Any]:
         raise ValueError("JSON object not found")
 
     return json.loads(cleaned[start : end + 1])
+
+
+def _extract_json_payload(raw_text: str) -> Dict[str, Any]:
+    cleaned = (raw_text or "").strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.S | re.I).strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```", 1)[1]
+        cleaned = cleaned.rsplit("```", 1)[0]
+        cleaned = cleaned.replace("json", "", 1).strip()
+
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"tags": parsed}
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    last_payload: Optional[Dict[str, Any]] = None
+    for index, char in enumerate(cleaned):
+        if char not in "{[":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(cleaned, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            last_payload = parsed
+        elif isinstance(parsed, list):
+            last_payload = {"tags": parsed}
+
+    if last_payload is not None:
+        return last_payload
+
+    raise ValueError("JSON payload not found")
+
+
+def _supports_tag(recipe: Dict[str, Any], tag_name: str) -> bool:
+    name = str(recipe.get("name") or "")
+    section_name = str(recipe.get("section_name") or "")
+    ingredients_text = str(recipe.get("ingredients_text") or "")
+    seasonings_text = str(recipe.get("seasonings_text") or "")
+    steps_text = str(recipe.get("steps_text") or "")
+    notes_text = str(recipe.get("notes_text") or "")
+    combined = " ".join([name, section_name, ingredients_text, seasonings_text, steps_text, notes_text]).lower()
+
+    staple_like = any(token in name for token in ("饭", "面", "粉", "米线", "粿", "通心粉", "意面", "面片"))
+    has_serve_with_rice_cue = any(token in combined for token in ("下饭", "配饭", "拌饭酱", "盖饭"))
+
+    strict_rules = {
+        "下饭": (not staple_like) or has_serve_with_rice_cue,
+        "一锅出": any(token in combined for token in ("一锅", "同锅", "一锅到底", "焖饭", "煲仔饭", "炖饭", "烩饭")),
+        "快手": any(token in combined for token in ("快手", "快速", "几分钟", "简单", "省时")),
+        "便当友好": any(token in combined for token in ("便当", "带饭", "复热", "隔夜")),
+        "宴客": any(token in combined for token in ("宴客", "待客", "招待", "聚餐", "请客", "正式上桌")),
+        "早餐友好": any(token in combined for token in ("早餐", "早午餐")),
+        "凉拌": any(token in combined for token in ("凉拌", "冷盘", "凉菜", "沙拉", "冷却后拌")),
+        "蒸制": any(token in combined for token in ("蒸", "蒸锅", "蒸箱")),
+        "汤羹": any(token in combined for token in ("汤", "羹", "高汤", "清汤", "浓汤")),
+    }
+    return strict_rules.get(tag_name, True)
+
+
+def _generate_tags_for_recipe(
+    recipe: Dict[str, Any],
+    tags: List[Dict[str, Any]],
+    model_name: str,
+    run_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    compact_recipe = {
+        "name": recipe.get("name", ""),
+        "library_section": recipe.get("library_section", ""),
+        "section_name": recipe.get("section_name", ""),
+        "cuisine": recipe.get("cuisine", ""),
+        "sub_cuisine": recipe.get("sub_cuisine", ""),
+        "ingredients_text": recipe.get("ingredients_text", ""),
+        "seasonings_text": recipe.get("seasonings_text", ""),
+        "notes_text": recipe.get("notes_text", ""),
+        "structured_ingredients": recipe.get("ingredients", []),
+    }
+    prompt_lines = [
+        "/no_think",
+        "Do not output thinking, analysis, explanation, or chain-of-thought.",
+        "Output the final JSON object immediately.",
+        "",
+        "Select the 0-3 most suitable tags for this recipe from the candidate tags.",
+        "Use only candidate tags. Do not invent new tags.",
+        "Be conservative. If uncertain, omit the tag.",
+        "Do not assign broad tags by default.",
+        "Do not assign '下饭' only because the dish itself is a rice or noodle dish.",
+        "Do not assign '一锅出', '快手', '便当友好', '宴客', or '早餐友好' unless the payload directly supports it.",
+        "Return JSON only. No prose, no markdown, no code fences.",
+        "Follow the provided JSON schema exactly.",
+        "",
+        "Candidate tags:",
+    ]
+    for item in tags:
+        description = item["description"] or "No description"
+        prompt_lines.append(f"- {item['name']}: {description}")
+
+    prompt_lines.extend(
+        [
+            "",
+            "Recipe payload:",
+            json.dumps(compact_recipe, ensure_ascii=False),
+        ]
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": "/no_think\nYou are a strict recipe tagging assistant. Output final valid JSON only. Never output thinking or analysis.",
+        },
+        {
+            "role": "user",
+            "content": "\n".join(prompt_lines),
+        },
+    ]
+
+    try:
+        raw_content = _call_ollama_chat(
+            model_name,
+            messages,
+            response_format=TAG_JSON_SCHEMA,
+        )
+    except Exception as error:
+        create_ai_conversation_log(
+            feature="managed_tagging",
+            stage="tagging",
+            model=model_name,
+            request_messages=messages,
+            status="error",
+            run_id=run_id,
+            recipe_id=recipe["id"],
+            error_text=str(error),
+            meta={"recipe_name": recipe["name"]},
+        )
+        raise
+
+    create_ai_conversation_log(
+        feature="managed_tagging",
+        stage="tagging",
+        model=model_name,
+        request_messages=messages,
+        status="success",
+        run_id=run_id,
+        recipe_id=recipe["id"],
+        response_text=raw_content,
+        meta={"recipe_name": recipe["name"]},
+    )
+
+    parsed = _extract_json_payload(raw_content)
+    tag_items = parsed.get("tags", [])
+    if not isinstance(tag_items, list):
+        return []
+
+    allowed_names = {item["name"] for item in tags}
+    selected: List[Dict[str, Any]] = []
+    seen = set()
+    for index, item in enumerate(tag_items):
+        if isinstance(item, str):
+            name = item.strip()
+            confidence = max(MIN_TAG_CONFIDENCE, 0.78 - index * 0.02)
+            reason = "模型直接返回标签名。"
+        elif isinstance(item, dict):
+            name = str((item or {}).get("name") or (item or {}).get("tag") or "").strip()
+            try:
+                confidence = float((item or {}).get("confidence", 0.75))
+            except (TypeError, ValueError):
+                confidence = 0.75
+            reason = str((item or {}).get("reason") or "模型选择该标签。").strip()
+        else:
+            continue
+
+        if not name or name not in allowed_names or name in seen:
+            continue
+        if confidence < MIN_TAG_CONFIDENCE or not reason or not _supports_tag(recipe, name):
+            continue
+        seen.add(name)
+        selected.append(
+            {
+                "name": name,
+                "confidence": max(0.0, min(confidence, 1.0)),
+                "reason": reason,
+            }
+        )
+    selected.sort(key=lambda value: (-value["confidence"], value["name"]))
+    return selected[:MAX_TAGS_PER_RECIPE]

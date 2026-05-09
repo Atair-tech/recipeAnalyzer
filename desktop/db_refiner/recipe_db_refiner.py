@@ -3,8 +3,10 @@ import json
 import re
 import sqlite3
 import threading
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import Tk, StringVar, filedialog, messagebox, ttk
 from typing import Callable, List, Optional, Tuple
@@ -14,8 +16,31 @@ APP_TITLE = "Data Helper"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 OLLAMA_TIMEOUT_SECONDS = 240
-REFINE_PROMPT_VERSION = "desktop-refine-v2"
+OLLAMA_MAX_ATTEMPTS = 1
+REFINE_PROMPT_VERSION = "import-refine-v8-raw-text-only-fallback"
 PREFERRED_MODEL = "qwen3:4b"
+
+INGREDIENT_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ingredients": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "amount": {"type": "string"},
+                    "unit": {"type": "string"},
+                    "remark": {"type": "string"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["ingredients"],
+    "additionalProperties": False,
+}
 
 OPTIONAL_PREFIXES = ("可加", "可放", "可用", "也可用", "也可加", "建议加", "最后加")
 OPTIONAL_SUFFIXES = ("可加", "可放", "可用", "也可用", "更好吃", "提味", "增香")
@@ -41,6 +66,13 @@ DROP_HINTS = (
     "需要",
     "常用食材",
     "原版",
+    "见牛肉词条",
+    "见猪肉词条",
+    "见鸡肉词条",
+    "词条",
+    "ingredient",
+    "anotheringredient",
+    "yetanotheringredient",
 )
 BRAND_PREFIXES = (
     "六必居",
@@ -82,8 +114,21 @@ INGREDIENT_SEGMENTS = (
     "雪菜",
     "青菜",
 )
-AMOUNT_IN_NAME_PATTERN = re.compile(r"(?P<prefix>.*?)(?P<amount>\d+(?:\.\d+)?)(?P<unit>g|kg|ml|mL|L|l|克|千克|毫升|公升)$", re.I)
+AMOUNT_IN_NAME_PATTERN = re.compile(
+    r"(?P<prefix>.*?)(?P<amount>\d+(?:\.\d+)?(?:[-~～至到]\d+(?:\.\d+)?)?)(?P<unit>g|kg|ml|mL|L|l|克|千克|毫升|公升|个|只|颗|粒|瓣|根|片|条|朵|盒|包|袋|勺|tsp|tbsp|cup)$",
+    re.I,
+)
+AMOUNT_WITH_UNIT_PATTERN = re.compile(
+    r"^(?P<amount>\d+(?:\.\d+)?(?:[-~～至到]\d+(?:\.\d+)?)?)(?P<unit>g|kg|ml|mL|L|l|克|千克|毫升|公升|个|只|颗|粒|瓣|根|片|条|朵|盒|包|袋|勺|tsp|tbsp|cup)$",
+    re.I,
+)
 PACKAGE_HINT_PATTERN = re.compile(r"(半包|半袋|一包|一袋|半盒|一盒)$")
+FALLBACK_SPLIT_PATTERN = re.compile(r"[，,、；;]")
+FALLBACK_CHOICE_PATTERN = re.compile(r"(?:/|／|\\|or|OR|或)")
+TRAILING_AMOUNT_PATTERN = re.compile(
+    r"^(?P<name>.*?)(?P<amount>\d+(?:\.\d+)?(?:[-~～至到]\d+(?:\.\d+)?)?)(?P<unit>g|kg|ml|mL|L|l|克|千克|毫升|公升|个|只|颗|粒|瓣|根|片|条|朵|枚|罐|盒|包|袋|勺|tsp|tbsp|cup)(?:约|左右|记)?$",
+    re.I,
+)
 INGREDIENT_ALIASES = {
     "包浆豆腐": "豆腐",
     "中豆腐": "豆腐",
@@ -105,11 +150,13 @@ class RecipeDbRefinerApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("380x220")
+        self.root.geometry("460x290")
         self.root.resizable(False, False)
 
         self.db_path: Optional[Path] = None
         self.progress_var = StringVar(value="0 / 0")
+        self.status_var = StringVar(value="Open a database to start.")
+        self.summary_var = StringVar(value="Total 0 | Success 0 | Failed 0 | Pending 0")
         self.model_var = StringVar(value="")
         self.available_models: List[str] = []
 
@@ -141,6 +188,22 @@ class RecipeDbRefinerApp:
             font=("Segoe UI", 28, "bold"),
         )
         progress.pack(fill="x", expand=True, pady=(8, 16))
+
+        status = ttk.Label(
+            frame,
+            textvariable=self.status_var,
+            anchor="center",
+            wraplength=360,
+        )
+        status.pack(fill="x", pady=(0, 12))
+
+        summary = ttk.Label(
+            frame,
+            textvariable=self.summary_var,
+            anchor="center",
+            wraplength=380,
+        )
+        summary.pack(fill="x", pady=(0, 12))
 
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
@@ -205,6 +268,8 @@ class RecipeDbRefinerApp:
         except Exception as error:
             self.db_path = None
             self.progress_var.set("0 / 0")
+            self.status_var.set("Open failed.")
+            self.summary_var.set("Total 0 | Success 0 | Failed 0 | Pending 0")
             messagebox.showerror("打开失败", str(error))
 
         self._refresh_buttons()
@@ -215,6 +280,11 @@ class RecipeDbRefinerApp:
         model = self._selected_model()
         if not model:
             messagebox.showerror("无法开始", "No Ollama model available")
+            return
+
+        paused_run = load_latest_paused_run(self.db_path, model)
+        if paused_run is not None:
+            self.resume_run()
             return
 
         run_id = create_refine_run(self.db_path, model, build_refine_version(model))
@@ -275,11 +345,30 @@ class RecipeDbRefinerApp:
 
     def _load_progress_from_database(self) -> None:
         status = load_latest_run_status(self.db_path, self._selected_model()) if self.db_path else None
+        self._load_summary_from_database()
         if not status:
             total = count_target_recipes(self.db_path) if self.db_path else 0
             self.progress_var.set(f"0 / {total}")
+            self.status_var.set("Ready.")
             return
         self.progress_var.set(f"{status['processed_count']} / {status['total_count']}")
+        self.status_var.set(format_run_status(status))
+
+    def _load_summary_from_database(self) -> None:
+        if self.db_path is None:
+            self.summary_var.set("Total 0 | Success 0 | Failed 0 | Pending 0")
+            return
+        model = self._selected_model()
+        if not model:
+            self.summary_var.set("Total 0 | Success 0 | Failed 0 | Pending 0")
+            return
+        try:
+            summary = load_refine_summary(self.db_path, model, build_refine_version(model))
+        except Exception:
+            return
+        self.summary_var.set(
+            f"Total {summary['total']} | Success {summary['success']} | Failed {summary['failed']} | Pending {summary['pending']}"
+        )
 
     def _maybe_notify_run_result(self, status: Optional[sqlite3.Row]) -> None:
         if status is None:
@@ -315,9 +404,16 @@ class RecipeDbRefinerApp:
             f"错误：{status['error_count']}",
         ]
         first_error = load_first_error_message(self.db_path, self._selected_model()) if self.db_path else None
+        first_raw_response = load_first_error_raw_response(self.db_path, self._selected_model()) if self.db_path else None
         if first_error:
             lines.append("")
             lines.append(f"首条错误：{first_error}")
+        if first_raw_response:
+            preview = first_raw_response.strip().replace("\r", " ").replace("\n", " ")
+            if len(preview) > 240:
+                preview = preview[:240] + "..."
+            lines.append("")
+            lines.append(f"首条原始响应：{preview}")
         elif status["error_message"]:
             lines.append("")
             lines.append(f"错误信息：{status['error_message']}")
@@ -353,7 +449,8 @@ def ensure_schema(db_path: Path) -> None:
                 refine_version TEXT,
                 refined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_run_id INTEGER,
-                last_error TEXT
+                last_error TEXT,
+                last_raw_response TEXT
             )
             """
         )
@@ -376,6 +473,30 @@ def ensure_schema(db_path: Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recipe_refine_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipe_id INTEGER NOT NULL,
+                run_id INTEGER,
+                model TEXT NOT NULL,
+                refine_version TEXT NOT NULL,
+                before_ingredients_json TEXT NOT NULL,
+                after_ingredients_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(recipe_ai_refine_state)").fetchall()}
+        if "last_raw_response" not in columns:
+            connection.execute("ALTER TABLE recipe_ai_refine_state ADD COLUMN last_raw_response TEXT")
+        run_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ai_refine_runs)").fetchall()}
+        if "current_recipe_id" not in run_columns:
+            connection.execute("ALTER TABLE ai_refine_runs ADD COLUMN current_recipe_id INTEGER")
+        if "current_recipe_name" not in run_columns:
+            connection.execute("ALTER TABLE ai_refine_runs ADD COLUMN current_recipe_name TEXT")
+        if "current_recipe_started_at" not in run_columns:
+            connection.execute("ALTER TABLE ai_refine_runs ADD COLUMN current_recipe_started_at TEXT")
         connection.commit()
 
 
@@ -395,6 +516,52 @@ def count_target_recipes(db_path: Optional[Path]) -> int:
         return connection.execute("SELECT COUNT(*) FROM recipes WHERE record_kind = 'recipe'").fetchone()[0]
 
 
+def load_refine_summary(db_path: Path, model: str, refine_version: str) -> dict:
+    with connect(db_path) as connection:
+        recipes = connection.execute(
+            """
+            SELECT id, source_hash
+            FROM recipes
+            WHERE record_kind = 'recipe'
+            ORDER BY id
+            """
+        ).fetchall()
+        state_rows = connection.execute(
+            """
+            SELECT recipe_id, source_hash, model, last_error
+            FROM recipe_ai_refine_state
+            WHERE model = ?
+            """,
+            (model,),
+        ).fetchall()
+
+    state_by_recipe = {int(row["recipe_id"]): row for row in state_rows}
+    success = 0
+    failed = 0
+    pending = 0
+    for recipe in recipes:
+        recipe_id = int(recipe["id"])
+        state = state_by_recipe.get(recipe_id)
+        if state is None or (state["source_hash"] or "") != (recipe["source_hash"] or ""):
+            pending += 1
+            continue
+        if (state["last_error"] or "").strip():
+            failed += 1
+            pending += 1
+            continue
+        if has_suspicious_refined_ingredients(db_path, recipe_id):
+            pending += 1
+        else:
+            success += 1
+
+    return {
+        "total": len(recipes),
+        "success": success,
+        "failed": failed,
+        "pending": pending,
+    }
+
+
 def load_latest_run_status(db_path: Path, model: str) -> Optional[sqlite3.Row]:
     with connect(db_path) as connection:
         return connection.execute(
@@ -403,12 +570,52 @@ def load_latest_run_status(db_path: Path, model: str) -> Optional[sqlite3.Row]:
         ).fetchone()
 
 
+def format_run_status(status: sqlite3.Row) -> str:
+    run_status = str(status["status"] or "")
+    if run_status == "running":
+        recipe_id = status["current_recipe_id"]
+        recipe_name = str(status["current_recipe_name"] or "").strip()
+        started_at = str(status["current_recipe_started_at"] or "").strip()
+        elapsed = format_elapsed_seconds(started_at)
+        label = f"#{recipe_id} {recipe_name}".strip() if recipe_id else "current recipe"
+        if elapsed:
+            return f"Processing: {label} ({elapsed})"
+        return f"Processing: {label}"
+    if run_status == "paused":
+        return "Paused. Click resume to continue."
+    if run_status == "completed":
+        return "Completed."
+    if run_status == "failed":
+        return "Failed. Check the error dialog."
+    return "Ready."
+
+
+def format_elapsed_seconds(started_at: str) -> str:
+    if not started_at:
+        return ""
+    try:
+        parsed = datetime.strptime(started_at.split(".")[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+    except ValueError:
+        return ""
+    minutes, remaining_seconds = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
+
+
 def load_latest_paused_run(db_path: Optional[Path], model: str) -> Optional[sqlite3.Row]:
     if db_path is None:
         return None
     with connect(db_path) as connection:
         return connection.execute(
-            "SELECT * FROM ai_refine_runs WHERE model = ? AND status = 'paused' ORDER BY id DESC LIMIT 1",
+            """
+            SELECT *
+            FROM ai_refine_runs
+            WHERE model = ? AND status = 'paused'
+            ORDER BY processed_count DESC, id DESC
+            LIMIT 1
+            """,
             (model,),
         ).fetchone()
 
@@ -430,6 +637,23 @@ def load_first_error_message(db_path: Optional[Path], model: str) -> Optional[st
     return row["last_error"] if row is not None else None
 
 
+def load_first_error_raw_response(db_path: Optional[Path], model: str) -> Optional[str]:
+    if db_path is None:
+        return None
+    with connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT last_raw_response
+            FROM recipe_ai_refine_state
+            WHERE model = ? AND last_raw_response IS NOT NULL AND TRIM(last_raw_response) <> ''
+            ORDER BY recipe_id
+            LIMIT 1
+            """,
+            (model,),
+        ).fetchone()
+    return row["last_raw_response"] if row is not None else None
+
+
 def create_refine_run(db_path: Path, model: str, refine_version: str) -> int:
     with connect(db_path) as connection:
         total_count = connection.execute("SELECT COUNT(*) FROM recipes WHERE record_kind = 'recipe'").fetchone()[0]
@@ -446,18 +670,40 @@ def create_refine_run(db_path: Path, model: str, refine_version: str) -> int:
         return int(cursor.lastrowid)
 
 
+def set_run_current_recipe(db_path: Path, run_id: int, recipe_id: Optional[int], recipe_name: Optional[str]) -> None:
+    with connect(db_path) as connection:
+        if recipe_id is None:
+            connection.execute(
+                """
+                UPDATE ai_refine_runs
+                SET current_recipe_id = NULL,
+                    current_recipe_name = NULL,
+                    current_recipe_started_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (run_id,),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE ai_refine_runs
+                SET current_recipe_id = ?,
+                    current_recipe_name = ?,
+                    current_recipe_started_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (recipe_id, recipe_name or "", run_id),
+            )
+        connection.commit()
+
+
 def build_refine_version(model: str) -> str:
     payload = {
         "version": REFINE_PROMPT_VERSION,
-        "model": model,
         "target_fields": ["ingredients"],
-        "behavior": {
-            "rerun_models": ["qwen3:0.6b"],
-            "skip_model": model,
-            "keep_only_ingredient_entities": True,
-            "optional_remark": "可选",
-            "rewrite_recipe_text_fields": False,
-        },
+        "rule": "keep only ingredient entities, split or mark optional items, never rewrite recipe text fields",
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -477,41 +723,72 @@ def run_refine_job(
                 (run_id,),
             ).fetchone()
             recipes = connection.execute(
-                "SELECT id, source_hash FROM recipes WHERE record_kind = 'recipe' ORDER BY id"
+                "SELECT id, name, source_hash FROM recipes WHERE record_kind = 'recipe' ORDER BY id"
             ).fetchall()
 
-        processed_count = int(run_row["processed_count"]) if run_row else 0
-        refined_count = int(run_row["refined_count"]) if run_row else 0
-        skipped_count = int(run_row["skipped_count"]) if run_row else 0
-        error_count = int(run_row["error_count"]) if run_row else 0
+        pending_recipes = []
+        skipped_count = 0
+        for recipe_row in recipes:
+            recipe_id = int(recipe_row["id"])
+            source_hash = recipe_row["source_hash"] or ""
+            if should_skip_recipe(db_path, recipe_id, source_hash, model, refine_version):
+                skipped_count += 1
+            else:
+                pending_recipes.append(recipe_row)
 
-        for recipe_row in recipes[processed_count:]:
+        processed_count = 0
+        refined_count = 0
+        error_count = 0
+        reset_run_for_pending_work(
+            db_path,
+            run_id,
+            total_count=len(pending_recipes),
+            processed_count=processed_count,
+            refined_count=refined_count,
+            skipped_count=skipped_count,
+            error_count=error_count,
+        )
+
+        for recipe_row in pending_recipes:
             if pause_flag_getter():
                 mark_run_paused(db_path, run_id)
                 return
 
             recipe_id = int(recipe_row["id"])
+            recipe_name = str(recipe_row["name"] or "").strip()
             source_hash = recipe_row["source_hash"] or ""
+            set_run_current_recipe(db_path, run_id, recipe_id, recipe_name)
 
             try:
-                if should_skip_recipe(db_path, recipe_id, source_hash, model, refine_version):
-                    skipped_count += 1
-                else:
-                    snapshot = load_recipe_snapshot(db_path, recipe_id)
-                    refined = generate_refined_recipe(snapshot, model)
-                    apply_refined_recipe(db_path, recipe_id, refined)
-                    upsert_refine_state(
-                        db_path,
-                        recipe_id=recipe_id,
-                        source_hash=source_hash,
-                        model=model,
-                        refine_version=refine_version,
-                        run_id=run_id,
-                        last_error=None,
-                    )
-                    refined_count += 1
+                snapshot = load_recipe_snapshot(db_path, recipe_id)
+                snapshot["source_hash"] = source_hash
+                result = generate_refined_recipe(snapshot, model)
+                apply_refined_recipe(db_path, recipe_id, result)
+                store_refine_snapshot(
+                    db_path,
+                    recipe_id=recipe_id,
+                    run_id=run_id,
+                    model=model,
+                    refine_version=refine_version,
+                    before_ingredients=snapshot["ingredients"],
+                    after_ingredients=result["ingredients"],
+                )
+                upsert_refine_state(
+                    db_path,
+                    recipe_id=recipe_id,
+                    source_hash=source_hash,
+                    model=model,
+                    refine_version=refine_version,
+                    run_id=run_id,
+                    last_error=None,
+                    last_raw_response=None,
+                )
+                refined_count += 1
+                processed_count += 1
+                update_run_progress(db_path, run_id, "running", processed_count, refined_count, skipped_count, error_count)
             except Exception as error:
                 error_count += 1
+                raw_response = getattr(error, "raw_response", None)
                 upsert_refine_state(
                     db_path,
                     recipe_id=recipe_id,
@@ -520,10 +797,10 @@ def run_refine_job(
                     refine_version=refine_version,
                     run_id=run_id,
                     last_error=str(error),
+                    last_raw_response=raw_response,
                 )
-
-            processed_count += 1
-            update_run_progress(db_path, run_id, "running", processed_count, refined_count, skipped_count, error_count)
+                processed_count += 1
+                update_run_progress(db_path, run_id, "running", processed_count, refined_count, skipped_count, error_count)
 
         complete_run(db_path, run_id, refined_count, skipped_count, error_count)
     except Exception as error:
@@ -532,7 +809,18 @@ def run_refine_job(
 
 def mark_run_paused(db_path: Path, run_id: int) -> None:
     with connect(db_path) as connection:
-        connection.execute("UPDATE ai_refine_runs SET status = 'paused', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (run_id,))
+        connection.execute(
+            """
+            UPDATE ai_refine_runs
+            SET status = 'paused',
+                current_recipe_id = NULL,
+                current_recipe_name = NULL,
+                current_recipe_started_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
         connection.commit()
 
 
@@ -557,6 +845,37 @@ def update_run_progress(
         connection.commit()
 
 
+def reset_run_for_pending_work(
+    db_path: Path,
+    run_id: int,
+    *,
+    total_count: int,
+    processed_count: int,
+    refined_count: int,
+    skipped_count: int,
+    error_count: int,
+) -> None:
+    with connect(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE ai_refine_runs
+            SET status = 'running',
+                total_count = ?,
+                processed_count = ?,
+                refined_count = ?,
+                skipped_count = ?,
+                error_count = ?,
+                current_recipe_id = NULL,
+                current_recipe_name = NULL,
+                current_recipe_started_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (total_count, processed_count, refined_count, skipped_count, error_count, run_id),
+        )
+        connection.commit()
+
+
 def complete_run(db_path: Path, run_id: int, refined_count: int, skipped_count: int, error_count: int) -> None:
     with connect(db_path) as connection:
         total_count = connection.execute("SELECT total_count FROM ai_refine_runs WHERE id = ?", (run_id,)).fetchone()[0]
@@ -568,6 +887,9 @@ def complete_run(db_path: Path, run_id: int, refined_count: int, skipped_count: 
                 refined_count = ?,
                 skipped_count = ?,
                 error_count = ?,
+                current_recipe_id = NULL,
+                current_recipe_name = NULL,
+                current_recipe_started_at = NULL,
                 updated_at = CURRENT_TIMESTAMP,
                 completed_at = CURRENT_TIMESTAMP
             WHERE id = ?
@@ -583,6 +905,9 @@ def fail_run(db_path: Path, run_id: int, error_message: str) -> None:
             """
             UPDATE ai_refine_runs
             SET status = 'failed',
+                current_recipe_id = NULL,
+                current_recipe_name = NULL,
+                current_recipe_started_at = NULL,
                 updated_at = CURRENT_TIMESTAMP,
                 completed_at = CURRENT_TIMESTAMP,
                 error_message = ?
@@ -596,16 +921,100 @@ def fail_run(db_path: Path, run_id: int, error_message: str) -> None:
 def should_skip_recipe(db_path: Path, recipe_id: int, source_hash: str, model: str, refine_version: str) -> bool:
     with connect(db_path) as connection:
         state = connection.execute(
-            "SELECT source_hash, model, refine_version FROM recipe_ai_refine_state WHERE recipe_id = ?",
+            "SELECT source_hash, model, refine_version, last_error FROM recipe_ai_refine_state WHERE recipe_id = ?",
             (recipe_id,),
         ).fetchone()
     if state is None:
         return False
-    return (
+    state_matches = (
         (state["source_hash"] or "") == source_hash
         and (state["model"] or "") == model
-        and (state["refine_version"] or "") == refine_version
+        and not (state["last_error"] or "").strip()
     )
+    if not state_matches:
+        return False
+    return not has_suspicious_refined_ingredients(db_path, recipe_id)
+
+
+def has_suspicious_refined_ingredients(db_path: Path, recipe_id: int) -> bool:
+    """Return True when a previous "successful" result should be refined again."""
+    with connect(db_path) as connection:
+        recipe_row = connection.execute(
+            """
+            SELECT ingredients_text, seasonings_text
+            FROM recipes
+            WHERE id = ?
+            """,
+            (recipe_id,),
+        ).fetchone()
+        ingredient_rows = connection.execute(
+            """
+            SELECT i.name, i.normalized_name, ri.amount, ri.unit, ri.remark
+            FROM recipe_ingredients ri
+            INNER JOIN ingredients i ON i.id = ri.ingredient_id
+            WHERE ri.recipe_id = ?
+            ORDER BY ri.id
+            """,
+            (recipe_id,),
+        ).fetchall()
+
+    if recipe_row is None:
+        return True
+
+    source_text = " ".join(
+        part.strip()
+        for part in [recipe_row["ingredients_text"] or "", recipe_row["seasonings_text"] or ""]
+        if part and part.strip()
+    )
+    if not source_text:
+        return False
+
+    for row in ingredient_rows:
+        name = (row["normalized_name"] or row["name"] or "").strip()
+        amount = (row["amount"] or "").strip()
+        unit = (row["unit"] or "").strip()
+        remark = (row["remark"] or "").strip()
+        if is_suspicious_refined_item(name, amount, unit, remark):
+            return True
+
+    source_candidates = count_source_ingredient_candidates(source_text)
+    if source_candidates >= 3 and len(ingredient_rows) <= 1:
+        return True
+    if source_candidates >= 6 and len(ingredient_rows) <= 2:
+        return True
+    return False
+
+
+def count_source_ingredient_candidates(source_text: str) -> int:
+    compact = re.sub(r"\s+", "", source_text or "")
+    if not compact:
+        return 0
+    parts = [
+        part.strip()
+        for part in re.split(r"[\u3001\uff0c\uff1b,;/\n]+", compact)
+        if part.strip()
+    ]
+    useful_parts = [
+        part
+        for part in parts
+        if len(part) <= 28 and not any(hint in part for hint in DROP_HINTS)
+    ]
+    return len(useful_parts)
+
+
+def is_suspicious_refined_item(name: str, amount: str, unit: str, remark: str) -> bool:
+    compact = re.sub(r"\s+", "", name or "")
+    if should_drop_name(compact):
+        return True
+    if re.search(r"\d", compact):
+        return True
+    if re.search(r"[\r\n:：;；。.!?？]", compact):
+        return True
+    if any(term in compact for term in ("\u914d\u7ea6", "\u66f4\u597d\u5403", "\u53ef\u52a0", "\u5efa\u8bae")):
+        return True
+    if (amount or "").strip() and (unit or "").strip() and AMOUNT_WITH_UNIT_PATTERN.match((amount or "").strip()):
+        return True
+    return False
 
 
 def upsert_refine_state(
@@ -617,23 +1026,60 @@ def upsert_refine_state(
     refine_version: str,
     run_id: int,
     last_error: Optional[str],
+    last_raw_response: Optional[str] = None,
 ) -> None:
     with connect(db_path) as connection:
         connection.execute(
             """
             INSERT INTO recipe_ai_refine_state (
-                recipe_id, source_hash, model, refine_version, refined_at, last_run_id, last_error
+                recipe_id, source_hash, model, refine_version, refined_at, last_run_id, last_error, last_raw_response
             )
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
             ON CONFLICT(recipe_id) DO UPDATE SET
                 source_hash = excluded.source_hash,
                 model = excluded.model,
                 refine_version = excluded.refine_version,
                 refined_at = CURRENT_TIMESTAMP,
                 last_run_id = excluded.last_run_id,
-                last_error = excluded.last_error
+                last_error = excluded.last_error,
+                last_raw_response = excluded.last_raw_response
             """,
-            (recipe_id, source_hash, model, refine_version, run_id, last_error),
+            (recipe_id, source_hash, model, refine_version, run_id, last_error, last_raw_response),
+        )
+        connection.commit()
+
+
+def store_refine_snapshot(
+    db_path: Path,
+    *,
+    recipe_id: int,
+    run_id: int,
+    model: str,
+    refine_version: str,
+    before_ingredients: List[dict],
+    after_ingredients: List[dict],
+) -> None:
+    with connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO recipe_refine_snapshots (
+                recipe_id,
+                run_id,
+                model,
+                refine_version,
+                before_ingredients_json,
+                after_ingredients_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                recipe_id,
+                run_id,
+                model,
+                refine_version,
+                json.dumps(before_ingredients, ensure_ascii=False),
+                json.dumps(after_ingredients, ensure_ascii=False),
+            ),
         )
         connection.commit()
 
@@ -644,7 +1090,7 @@ def load_recipe_snapshot(db_path: Path, recipe_id: int) -> dict:
             """
             SELECT
                 id, name, library_section, section_name, cuisine, sub_cuisine,
-                ingredients_text, seasonings_text, steps_text, notes_text, source_reference, source_text
+                ingredients_text, seasonings_text
             FROM recipes
             WHERE id = ?
             """,
@@ -673,10 +1119,6 @@ def load_recipe_snapshot(db_path: Path, recipe_id: int) -> dict:
         "sub_cuisine": recipe_row["sub_cuisine"] or "",
         "ingredients_text": recipe_row["ingredients_text"] or "",
         "seasonings_text": recipe_row["seasonings_text"] or "",
-        "steps_text": recipe_row["steps_text"] or "",
-        "notes_text": recipe_row["notes_text"] or "",
-        "source_reference": recipe_row["source_reference"] or "",
-        "source_text": recipe_row["source_text"] or "",
         "ingredients": [
             {
                 "name": row["name"] or "",
@@ -690,39 +1132,83 @@ def load_recipe_snapshot(db_path: Path, recipe_id: int) -> dict:
 
 
 def generate_refined_recipe(recipe: dict, model: str) -> dict:
-    response_text = call_ollama_chat(model, build_refine_messages(recipe))
-    payload = extract_json_payload(response_text)
-    ingredients = sanitize_ingredients(payload.get("ingredients"))
+    if not has_source_for_model_refine(recipe):
+        return {"ingredients": []}
+
+    response_text = call_ollama_chat(model, build_refine_messages(recipe), response_format=INGREDIENT_JSON_SCHEMA)
+    parse_error: Optional[Exception] = None
+    ingredients: List[dict] = []
+    try:
+        payload = extract_json_payload(response_text)
+        ingredients = sanitize_ingredients(payload.get("ingredients"))
+    except Exception as error:
+        parse_error = error
+    if not ingredients:
+        ingredients = fallback_ingredients_from_source(recipe)
     if not ingredients and (recipe["ingredients_text"] or recipe["ingredients"]):
-        raise RuntimeError("Model returned no usable ingredient entities")
+        error = RuntimeError(
+            "Model did not return usable ingredient entities"
+            if parse_error is not None
+            else "Model returned no usable ingredient entities"
+        )
+        setattr(error, "raw_response", response_text)
+        raise error
     return {"ingredients": ingredients}
 
 
+def has_source_for_model_refine(recipe: dict) -> bool:
+    text = " ".join(
+        str(recipe.get(key) or "").strip()
+        for key in ("ingredients_text", "seasonings_text")
+    ).strip()
+    if text:
+        return True
+    return bool(recipe.get("ingredients"))
+
+
 def build_refine_messages(recipe: dict) -> List[dict]:
+    compact_payload = {
+        "name": recipe.get("name", ""),
+        "library_section": recipe.get("library_section", ""),
+        "section_name": recipe.get("section_name", ""),
+        "ingredients_text": recipe.get("ingredients_text", ""),
+        "seasonings_text": recipe.get("seasonings_text", ""),
+    }
     prompt = "\n".join(
         [
-            "你负责精校菜谱中的结构化食材，只返回合法 JSON。",
-            "不要改写 ingredients_text、seasonings_text、steps_text、notes_text。",
-            "你只需要输出 ingredients 数组。",
+            "/no_think",
+            "Do not output thinking, analysis, explanation, or chain-of-thought.",
+            "Output the final JSON object immediately.",
             "",
-            "严格规则：",
-            "1. name 必须是可以单独采购或明确识别的食材本体。",
-            "2. 不要输出成菜名、套餐名、口味描述、建议句、品牌宣传、比例说明、标点残片。",
-            "3. 对于 A/B、A or B、A（也可用B），拆成多个 ingredient，非主选项 remark=可选。",
-            "4. 对于 可加A、加A更好吃、可放B、也可用C，输出 name=A/B/C，remark=可选。",
-            "5. 对于不是食材实体的内容，直接丢弃。",
-            "6. 不要发明原文中不存在的信息。",
-            "7. 只输出一个 JSON 对象，不要 Markdown，不要解释。",
+            "Extract only structured ingredient entities from the recipe.",
+            "Only use ingredients_text and seasonings_text.",
+            "Ignore cooking steps. Do not infer ingredients from dish name alone.",
+            "Return JSON only. No prose, no markdown, no code fences.",
             "",
-            "JSON 格式：",
-            '{"ingredients":[{"name":"","amount":"","unit":"","remark":""}]}',
+            "Rules:",
+            "1. name must be a concrete ingredient entity that can be bought or clearly identified.",
+            "2. Drop dish names, flavor descriptions, explanatory sentences, brand slogans, ratio notes, and punctuation fragments.",
+            "3. For A/B, A or B, or A(also B), split into multiple ingredient items. Non-primary options use remark='可选'.",
+            "4. For phrases like 可加A, 加A更好吃, 可放B, 也可用C, keep only the ingredient name and set remark='可选'.",
+            "5. Do not invent ingredients that are not present in the source text.",
+            "6. Do not translate Chinese ingredient names into English. Keep the source language.",
+            "7. Never output placeholders such as ingredient1, ingredient2, anotheringredient, yetanotheringredient.",
+            "8. Never output pure quantities such as 500g as ingredient names.",
+            "9. For references such as 见牛肉词条..., return no ingredient unless an actual ingredient name is present outside the reference.",
+            "10. Follow the provided JSON schema exactly.",
             "",
-            "菜谱信息：",
-            json.dumps(recipe, ensure_ascii=False),
+            "JSON schema target:",
+            json.dumps(INGREDIENT_JSON_SCHEMA, ensure_ascii=False),
+            "",
+            "Recipe payload:",
+            json.dumps(compact_payload, ensure_ascii=False),
         ]
     )
     return [
-        {"role": "system", "content": "你是严谨的菜谱结构化整理助手。"},
+        {
+            "role": "system",
+            "content": "/no_think\nYou are a strict ingredient extraction assistant. Output final valid JSON only. Never output thinking or analysis.",
+        },
         {"role": "user", "content": prompt},
     ]
 
@@ -753,65 +1239,123 @@ def fetch_ollama_models() -> List[str]:
     return models
 
 
-def call_ollama_chat(model: str, messages: List[dict]) -> str:
-    body = json.dumps(
-        {
-            "model": model,
-            "stream": False,
-            "options": {"temperature": 0.1, "thinking": False},
-            "messages": messages,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        OLLAMA_URL,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Ollama HTTP {error.code}: {detail}") from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Ollama unavailable: {error}") from error
-
-    message = payload.get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("Ollama returned empty content")
-    return content
+def call_ollama_chat(
+    model: str,
+    messages: List[dict],
+    response_format: Optional[object] = None,
+    max_attempts: int = OLLAMA_MAX_ATTEMPTS,
+) -> str:
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        body = json.dumps(
+            {
+                "model": model,
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "thinking": False,
+                    "num_ctx": 2048,
+                    "num_predict": 1536,
+                },
+                "messages": messages,
+                **({"format": response_format} if response_format is not None else {}),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            OLLAMA_URL,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            message = payload.get("message") or {}
+            content = str(message.get("content") or "").strip()
+            thinking = str(message.get("thinking") or "").strip()
+            if thinking and not content:
+                content = thinking
+            if not content:
+                raise RuntimeError("Ollama returned empty content")
+            return content
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            retryable = error.code >= 500 or error.code == 408
+            last_error = RuntimeError(f"Ollama HTTP {error.code}: {detail}")
+            if not retryable or attempt >= max_attempts:
+                raise last_error from error
+        except (urllib.error.URLError, TimeoutError) as error:
+            last_error = RuntimeError(f"Ollama unavailable: {error}")
+            if "timed out" not in str(error).lower() or attempt >= max_attempts:
+                raise last_error from error
+        except Exception as error:
+            last_error = error
+            if "timed out" not in str(error).lower() or attempt >= max_attempts:
+                raise
+        time.sleep(0.6)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Ollama call failed without an error")
 
 
 def extract_json_payload(response_text: str) -> dict:
     text = response_text.strip()
+    if text.startswith("```"):
+        text = text.split("```", 1)[1]
+        text = text.rsplit("```", 1)[0]
+        text = text.replace("json", "", 1).strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I).strip()
+    text = strip_thinking_process(text)
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             return parsed
+        if isinstance(parsed, list):
+            return {"ingredients": parsed}
     except json.JSONDecodeError:
         pass
 
     decoder = json.JSONDecoder()
-    last_object = None
+    last_payload = None
     for index, char in enumerate(text):
-        if char != "{":
+        if char not in "[{":
             continue
         try:
             parsed, _ = decoder.raw_decode(text, index)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            last_object = parsed
+            last_payload = parsed
+        elif isinstance(parsed, list):
+            last_payload = {"ingredients": parsed}
 
-    if last_object is not None:
-        return last_object
+    if last_payload is not None:
+        return last_payload
 
     raise RuntimeError("Model did not return JSON")
+
+
+def strip_thinking_process(text: str) -> str:
+    markers = [
+        "Final JSON:",
+        "Final Answer:",
+        "Output:",
+        "Result:",
+        "JSON:",
+    ]
+    lowered = text.lower()
+    if "thinking process" not in lowered and "analysis" not in lowered:
+        return text
+    for marker in markers:
+        index = text.rfind(marker)
+        if index >= 0:
+            return text[index + len(marker) :].strip()
+    last_object = text.rfind('{"ingredients"')
+    if last_object >= 0:
+        return text[last_object:].strip()
+    return text
 
 
 def sanitize_ingredients(items: object) -> List[dict]:
@@ -845,13 +1389,86 @@ def sanitize_ingredients(items: object) -> List[dict]:
     return normalized
 
 
+def fallback_ingredients_from_source(recipe: dict) -> List[dict]:
+    text = "，".join(
+        part.strip()
+        for part in [
+            recipe.get("ingredients_text") or "",
+            recipe.get("seasonings_text") or "",
+        ]
+        if part and part.strip()
+    )
+    if not text:
+        return []
+
+    raw_parts = [part.strip() for part in FALLBACK_SPLIT_PATTERN.split(text) if part.strip()]
+    if not raw_parts:
+        raw_parts = [text]
+    if len(raw_parts) > 48:
+        return []
+
+    candidates: List[dict] = []
+    for raw_part in raw_parts:
+        cleaned_part = clean_fallback_part(raw_part)
+        if not cleaned_part:
+            continue
+        if len(cleaned_part) > 24:
+            continue
+        candidates.append({"name": cleaned_part, "amount": "", "unit": "", "remark": ""})
+
+    sanitized = sanitize_ingredients(candidates)
+    if sanitized:
+        return sanitized
+
+    if len(raw_parts) == 1 and len(raw_parts[0]) <= 40 and FALLBACK_CHOICE_PATTERN.search(raw_parts[0]):
+        return sanitize_ingredients([{"name": raw_parts[0], "amount": "", "unit": "", "remark": ""}])
+
+    return []
+
+
+def clean_fallback_part(raw_part: str) -> str:
+    text = str(raw_part or "").strip()
+    text = re.sub(r"[【\[].*?[】\]]", "", text)
+    text = re.sub(r"^[^：:]{1,12}[：:]", "", text)
+    text = re.sub(r"（[^）]{0,30}）", "", text)
+    text = re.sub(r"\([^)]{0,30}\)", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text.strip(" ,，、。；;:：")
+
+
 def normalize_item_fields(name: str, amount: str, unit: str, remark: str) -> Tuple[str, str, str, str]:
     candidate = re.sub(r"\s+", "", name or "")
     candidate = re.sub(r"[()（）\[\]【】]", "", candidate)
+    amount, unit = normalize_amount_unit(amount, unit)
+    candidate, amount, unit = split_trailing_amount(candidate, amount, unit)
     candidate = strip_known_prefixes(candidate)
     candidate, amount, unit, remark = extract_amount_from_name(candidate, amount, unit, remark)
     candidate = extract_named_fragment(candidate)
     return candidate, amount, unit, remark
+
+
+def normalize_amount_unit(amount: str, unit: str) -> Tuple[str, str]:
+    clean_amount = re.sub(r"\s+", "", amount or "")
+    clean_unit = re.sub(r"\s+", "", unit or "")
+    match = AMOUNT_WITH_UNIT_PATTERN.match(clean_amount)
+    if match:
+        parsed_unit = match.group("unit")
+        if not clean_unit or clean_unit.lower() == parsed_unit.lower():
+            clean_amount = match.group("amount")
+            clean_unit = parsed_unit
+    return clean_amount, clean_unit
+
+
+def split_trailing_amount(name: str, amount: str, unit: str) -> Tuple[str, str, str]:
+    if amount or unit:
+        return name, amount, unit
+    match = TRAILING_AMOUNT_PATTERN.match(name)
+    if not match:
+        return name, amount, unit
+    candidate_name = (match.group("name") or "").strip()
+    if not candidate_name:
+        return name, amount, unit
+    return candidate_name, match.group("amount"), match.group("unit")
 
 
 def split_choice_name(name: str, amount: str, unit: str, remark: str) -> List[Tuple[str, str, str, str]]:
@@ -963,6 +1580,10 @@ def normalize_ingredient_name(name: str) -> str:
 def should_drop_name(name: str) -> bool:
     compact = re.sub(r"\s+", "", name or "")
     if not compact or len(compact) > 20 or compact in {"%", "％", "1"}:
+        return True
+    if AMOUNT_WITH_UNIT_PATTERN.match(compact) or re.fullmatch(r"\d+(?:\.\d+)?", compact):
+        return True
+    if re.search(r"[A-Za-z]", compact):
         return True
     return any(hint in compact for hint in DROP_HINTS)
 

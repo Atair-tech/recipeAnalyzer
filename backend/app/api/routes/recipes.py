@@ -3,13 +3,18 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
-from app.schemas.recipe import RecipeUpdatePayload
+from app.schemas.recipe import RecipeEditorCreatePayload, RecipeEditorRowPayload, RecipeUpdatePayload
 from app.services.excel_export_service import build_excel_bytes, normalize_filename
 from app.services.recipe_service import (
+    create_recipe_editor_row,
     export_recipes_rows,
     get_recipe,
+    get_recipe_editor_schema,
     get_recipe_filters,
+    list_recipe_editor_rows,
     list_recipes,
+    update_recipe,
+    update_recipe_editor_row,
 )
 
 
@@ -89,6 +94,35 @@ def recipe_filters():
     return get_recipe_filters()
 
 
+@router.get("/recipes/editor/schema")
+def recipe_editor_schema():
+    return get_recipe_editor_schema()
+
+
+@router.get("/recipes/editor/rows")
+def recipe_editor_rows():
+    return {"items": list_recipe_editor_rows()}
+
+
+@router.post("/recipes/editor/rows")
+def recipe_editor_create(payload: RecipeEditorCreatePayload):
+    try:
+        return create_recipe_editor_row(payload.values)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.put("/recipes/editor/rows/{recipe_id}")
+def recipe_editor_update(recipe_id: int, payload: RecipeEditorRowPayload):
+    try:
+        recipe = update_recipe_editor_row(recipe_id, payload.values)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return recipe
+
+
 @router.get("/recipes/{recipe_id}")
 def recipe_detail(recipe_id: int):
     recipe = get_recipe(recipe_id)
@@ -99,7 +133,10 @@ def recipe_detail(recipe_id: int):
 
 @router.put("/recipes/{recipe_id}")
 def recipe_update(recipe_id: int, payload: RecipeUpdatePayload):
-    raise HTTPException(
-        status_code=403,
-        detail="Recipe editing is disabled in import-sync mode",
-    )
+    try:
+        recipe = update_recipe(recipe_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return recipe

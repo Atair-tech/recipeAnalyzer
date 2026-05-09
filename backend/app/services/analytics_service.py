@@ -60,7 +60,7 @@ def get_analytics_summary(dimension: str = "library_section", scope: str = "all"
                 SUM(CASE WHEN record_kind = 'backlog' THEN 1 ELSE 0 END) AS backlog_count,
                 COUNT(DISTINCT library_section) AS library_section_count,
                 SUM(CASE WHEN steps_text IS NOT NULL AND TRIM(steps_text) <> '' THEN 1 ELSE 0 END) AS record_with_method_count,
-                (SELECT COUNT(*) FROM ingredients) AS ingredient_count,
+                (SELECT COUNT(*) FROM ingredients WHERE is_visible = 1) AS ingredient_count,
                 (SELECT COUNT(*) FROM import_batches) AS import_batch_count
             FROM recipes
             """
@@ -100,6 +100,7 @@ def _load_chart_rows(connection, dimension: str, scope: str, top_n: int):
     if dimension == "tag":
         where_clauses.append("mt.name IS NOT NULL")
     if dimension == "ingredient":
+        where_clauses.append("i.is_visible = 1")
         where_clauses.append("COALESCE(i.normalized_name, i.name) IS NOT NULL")
 
     where_sql = f"WHERE {' AND '.join(f'({item})' for item in where_clauses)}" if where_clauses else ""

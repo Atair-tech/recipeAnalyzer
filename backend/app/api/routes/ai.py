@@ -23,6 +23,8 @@ class LlmChatRequest(BaseModel):
     top_k: int = 6
     history: list[dict[str, str]] = []
     show_reasoning: bool = False
+    use_deepseek_interpretation: bool = True
+    allow_external_rerank: bool = False
 
 
 @router.get("/ai/natural-search")
@@ -80,9 +82,11 @@ def ai_llm_chat(payload: LlmChatRequest):
         return ask_recipe_assistant(
             message=payload.message,
             model=payload.model,
-            selected_recipe_id=payload.selected_recipe_id,
+            selected_recipe_id=None,
             top_k=payload.top_k,
             history=payload.history,
+            use_deepseek_interpretation=payload.use_deepseek_interpretation,
+            allow_external_rerank=payload.allow_external_rerank,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -99,10 +103,12 @@ def ai_llm_chat_stream(payload: LlmChatRequest):
             yield from stream_recipe_assistant(
                 message=payload.message,
                 model=payload.model,
-                selected_recipe_id=payload.selected_recipe_id,
+                selected_recipe_id=None,
                 top_k=payload.top_k,
                 history=payload.history,
                 show_reasoning=payload.show_reasoning,
+                use_deepseek_interpretation=payload.use_deepseek_interpretation,
+                allow_external_rerank=payload.allow_external_rerank,
             )
         except ValueError as error:
             yield json.dumps({"type": "error", "error": str(error)}, ensure_ascii=False) + "\n"
@@ -110,6 +116,8 @@ def ai_llm_chat_stream(payload: LlmChatRequest):
             yield json.dumps({"type": "error", "error": f"Ollama request failed: {error}"}, ensure_ascii=False) + "\n"
         except RuntimeError as error:
             yield json.dumps({"type": "error", "error": str(error)}, ensure_ascii=False) + "\n"
+        except Exception as error:
+            yield json.dumps({"type": "error", "error": f"Streaming request failed: {error}"}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 

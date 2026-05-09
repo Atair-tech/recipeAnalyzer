@@ -9,9 +9,36 @@ from app.db.database import get_connection
 from app.services.ai_log_service import create_ai_conversation_log
 from app.services.ingredient_service import normalize_ingredient_name, sync_recipe_ingredients_from_items
 from app.services.ollama_service import OLLAMA_DEFAULT_MODEL, _call_ollama_chat as _ollama_chat_impl
+from app.services.refine_hash_service import build_refinement_source_hash
 
 
-REFINE_PROMPT_VERSION = "import-refine-v3"
+REFINE_PROMPT_VERSION = "import-refine-v6-no-think-compact"
+COMPATIBLE_REFINE_VERSIONS = {
+    "1f7dcba16db8b4a59ad9ff00dd3da139753ec5bdf0f62306675818f3ad9e1459",
+    "ff0f5ea05854a0ac7b400030449eb3a5247fe1c8dc45411200c6286333d46a6e",
+}
+
+INGREDIENT_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ingredients": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "amount": {"type": "string"},
+                    "unit": {"type": "string"},
+                    "remark": {"type": "string"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["ingredients"],
+    "additionalProperties": False,
+}
 
 OPTIONAL_PREFIXES = ("可加", "可放", "可用", "也可用", "也可加", "建议加", "最后加")
 OPTIONAL_SUFFIXES = ("可加", "可放", "可用", "也可用", "更好吃", "提味", "增香")
@@ -80,6 +107,8 @@ INGREDIENT_SEGMENTS = (
 )
 AMOUNT_IN_NAME_PATTERN = re.compile(r"(?P<prefix>.*?)(?P<amount>\d+(?:\.\d+)?)(?P<unit>g|kg|ml|mL|L|l|克|千克|毫升|公升)$", re.I)
 PACKAGE_HINT_PATTERN = re.compile(r"(半包|半袋|一包|一袋|半盒|一盒)$")
+FALLBACK_SPLIT_PATTERN = re.compile(r"[，,、；;]")
+FALLBACK_CHOICE_PATTERN = re.compile(r"(?:/|／|\\|or|OR|或)")
 
 _job_lock = threading.Lock()
 _job_state = {
@@ -89,11 +118,28 @@ _job_state = {
 }
 
 
-def _call_ollama_chat(model_name: str, messages: List[Dict[str, str]], max_attempts: int = 2) -> str:
+class RefineGenerationError(RuntimeError):
+    def __init__(self, message: str, *, raw_response: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+
+
+def _call_ollama_chat(
+    model_name: str,
+    messages: List[Dict[str, str]],
+    *,
+    response_format: Optional[Any] = None,
+    max_attempts: int = 1,
+) -> str:
     last_error: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         try:
-            return _ollama_chat_impl(model_name, messages)
+            return _ollama_chat_impl(
+                model_name,
+                messages,
+                response_format=response_format,
+                extra_options={"temperature": 0.1, "num_ctx": 2048, "num_predict": 1536},
+            )
         except Exception as error:
             last_error = error
             if "timed out" not in str(error).lower() or attempt >= max_attempts:
@@ -202,32 +248,120 @@ def resume_refine_run() -> Dict[str, Any]:
     return get_refine_status()
 
 
+def _should_skip_recipe_refinement(
+    recipe_id: int,
+    source_hash: str,
+    model_name: str,
+    refine_version: str,
+    legacy_source_hash: Optional[str] = None,
+) -> bool:
+    with get_connection() as connection:
+        state_row = connection.execute(
+            """
+            SELECT source_hash, model, refine_version, last_error
+            FROM recipe_ai_refine_state
+            WHERE recipe_id = ?
+            """,
+            (recipe_id,),
+        ).fetchone()
+
+    return bool(
+        state_row is not None
+        and (state_row["source_hash"] or "") in {source_hash or "", legacy_source_hash or ""}
+        and state_row["model"] == model_name
+        and _is_compatible_refine_version(state_row["refine_version"], refine_version)
+        and not (state_row["last_error"] or "").strip()
+        and not _has_suspicious_refined_ingredients(recipe_id)
+    )
+
+
+def _is_compatible_refine_version(stored_version: Optional[str], current_version: str) -> bool:
+    if stored_version == current_version:
+        return True
+    return bool(stored_version and stored_version in COMPATIBLE_REFINE_VERSIONS)
+
+
+def _has_suspicious_refined_ingredients(recipe_id: int) -> bool:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT i.name, ri.amount, ri.unit
+            FROM recipe_ingredients AS ri
+            INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
+            WHERE ri.recipe_id = ?
+            """,
+            (recipe_id,),
+        ).fetchall()
+
+    for row in rows:
+        name = str(row["name"] or "").strip()
+        amount = str(row["amount"] or "").strip()
+        unit = str(row["unit"] or "").strip()
+        if _should_drop_refined_name(name):
+            return True
+        if re.search(r"[A-Za-z]", name):
+            return True
+        if re.fullmatch(r"\d+(?:\.\d+)?(?:g|kg|ml|l|L|mL)?", name, flags=re.I):
+            return True
+        if "ingredient" in name.lower() or "词条" in name or "見" in name or "见" in name:
+            return True
+        if amount and unit and amount.lower().endswith(unit.lower()):
+            return True
+    return False
+
+
 def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
     try:
         with get_connection() as connection:
             recipes = connection.execute(
                 """
-                SELECT id, source_hash
+                SELECT
+                    id,
+                    name,
+                    source_hash,
+                    library_section,
+                    section_name,
+                    ingredients_text,
+                    seasonings_text
                 FROM recipes
                 WHERE record_kind = 'recipe'
                 ORDER BY id
                 """
             ).fetchall()
-            current_run = connection.execute(
+
+        pending_recipes = []
+        skipped_count = 0
+        for recipe_row in recipes:
+            recipe_id = int(recipe_row["id"])
+            source_hash = build_refinement_source_hash(dict(recipe_row))
+            legacy_source_hash = recipe_row["source_hash"] or ""
+            if _should_skip_recipe_refinement(recipe_id, source_hash, model_name, refine_version, legacy_source_hash):
+                skipped_count += 1
+            else:
+                pending_recipes.append(recipe_row)
+
+        processed_count = 0
+        refined_count = 0
+        error_count = 0
+        with get_connection() as connection:
+            connection.execute(
                 """
-                SELECT processed_count, refined_count, skipped_count, error_count
-                FROM ai_refine_runs
+                UPDATE ai_refine_runs
+                SET
+                    status = 'running',
+                    total_count = ?,
+                    processed_count = ?,
+                    refined_count = ?,
+                    skipped_count = ?,
+                    error_count = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (run_id,),
-            ).fetchone()
+                (len(pending_recipes), processed_count, refined_count, skipped_count, error_count, run_id),
+            )
+            connection.commit()
 
-        processed_count = current_run["processed_count"] if current_run else 0
-        refined_count = current_run["refined_count"] if current_run else 0
-        skipped_count = current_run["skipped_count"] if current_run else 0
-        error_count = current_run["error_count"] if current_run else 0
-
-        for row in recipes[processed_count:]:
+        for row in pending_recipes:
             with _job_lock:
                 pause_requested = bool(_job_state["pause_requested"])
 
@@ -241,25 +375,11 @@ def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
                 return
 
             recipe_id = row["id"]
-            source_hash = row["source_hash"]
+            source_hash = build_refinement_source_hash(dict(row))
+            legacy_source_hash = row["source_hash"] or ""
 
             try:
-                with get_connection() as connection:
-                    state_row = connection.execute(
-                        """
-                        SELECT source_hash, model, refine_version
-                        FROM recipe_ai_refine_state
-                        WHERE recipe_id = ?
-                        """,
-                        (recipe_id,),
-                    ).fetchone()
-
-                if (
-                    state_row is not None
-                    and state_row["source_hash"] == source_hash
-                    and state_row["model"] == model_name
-                    and state_row["refine_version"] == refine_version
-                ):
+                if _should_skip_recipe_refinement(recipe_id, source_hash or "", model_name, refine_version, legacy_source_hash):
                     skipped_count += 1
                 else:
                     snapshot = _load_recipe_snapshot(recipe_id)
@@ -284,16 +404,18 @@ def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
                                 refine_version,
                                 refined_at,
                                 last_run_id,
-                                last_error
+                                last_error,
+                                last_raw_response
                             )
-                            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, NULL)
+                            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, NULL, NULL)
                             ON CONFLICT(recipe_id) DO UPDATE SET
                                 source_hash = excluded.source_hash,
                                 model = excluded.model,
                                 refine_version = excluded.refine_version,
                                 refined_at = CURRENT_TIMESTAMP,
                                 last_run_id = excluded.last_run_id,
-                                last_error = NULL
+                                last_error = NULL,
+                                last_raw_response = NULL
                             """,
                             (recipe_id, source_hash, model_name, refine_version, run_id),
                         )
@@ -301,6 +423,7 @@ def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
                     refined_count += 1
             except Exception as error:
                 error_count += 1
+                raw_response = getattr(error, "raw_response", None)
                 with get_connection() as connection:
                     connection.execute(
                         """
@@ -311,18 +434,20 @@ def _run_refine_job(run_id: int, model_name: str, refine_version: str) -> None:
                             refine_version,
                             refined_at,
                             last_run_id,
-                            last_error
+                            last_error,
+                            last_raw_response
                         )
-                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
                         ON CONFLICT(recipe_id) DO UPDATE SET
                             source_hash = excluded.source_hash,
                             model = excluded.model,
                             refine_version = excluded.refine_version,
                             refined_at = CURRENT_TIMESTAMP,
                             last_run_id = excluded.last_run_id,
-                            last_error = excluded.last_error
+                            last_error = excluded.last_error,
+                            last_raw_response = excluded.last_raw_response
                         """,
-                        (recipe_id, source_hash, model_name, refine_version, run_id, str(error)),
+                        (recipe_id, source_hash, model_name, refine_version, run_id, str(error), raw_response),
                     )
                     connection.commit()
 
@@ -480,36 +605,54 @@ def _generate_refined_ingredients(
     model_name: str,
     run_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    compact_payload = {
+        "name": recipe.get("name", ""),
+        "library_section": recipe.get("library_section", ""),
+        "section_name": recipe.get("section_name", ""),
+        "ingredients_text": recipe.get("ingredients_text", ""),
+        "seasonings_text": recipe.get("seasonings_text", ""),
+    }
     prompt = "\n".join(
         [
-            "你负责精校菜谱中的结构化食材，只返回合法 JSON。",
-            "不要改写 ingredients_text、seasonings_text、steps_text、notes_text。",
-            "你只需要输出 ingredients 数组。",
+            "/no_think",
+            "Do not output thinking, analysis, explanation, or chain-of-thought.",
+            "Output the final JSON object immediately.",
             "",
-            "严格规则：",
-            "1. name 必须是可以单独采购或明确识别的食材本体。",
-            "2. 不要输出成菜名、套餐名、口味描述、建议句、品牌宣传、比例说明、标点残片。",
-            "3. 对于 A/B、A or B、A（也可用B），拆成多个 ingredient，非主选项 remark=可选。",
-            "4. 对于 可加A、加A更好吃、可放B、也可用C，输出 name=A/B/C，remark=可选。",
-            "5. 对于不是食材实体的内容，直接丢弃。",
-            "6. 不要发明原文中不存在的信息。",
-            "7. 只输出一个 JSON 对象，不要 Markdown，不要解释。",
+            "Extract only structured ingredient entities from the recipe.",
+            "Only use ingredients_text and seasonings_text.",
+            "Ignore cooking steps. Do not infer ingredients from dish name alone.",
+            "Return JSON only. No prose, no markdown, no code fences.",
             "",
-            "JSON 格式：",
-            '{"ingredients":[{"name":"","amount":"","unit":"","remark":""}]}',
+            "Rules:",
+            "1. name must be a concrete ingredient entity that can be bought or clearly identified.",
+            "2. Drop dish names, flavor descriptions, explanatory sentences, brand slogans, ratio notes, and punctuation fragments.",
+            "3. For A/B, A or B, or A(also B), split into multiple ingredient items. Non-primary options use remark='可选'.",
+            "4. For phrases like 可加A, 加A更好吃, 可放B, 也可用C, keep only the ingredient name and set remark='可选'.",
+            "5. Do not invent ingredients that are not present in the source text.",
+            "6. Do not translate Chinese ingredient names into English. Keep the source language.",
+            "7. Never output placeholders such as ingredient1, ingredient2, anotheringredient, yetanotheringredient.",
+            "8. Never output pure quantities such as 500g as ingredient names.",
+            "9. For references such as 见牛肉词条, return no ingredient unless an actual ingredient name is present outside the reference.",
+            "10. Follow the provided JSON schema exactly.",
             "",
-            "菜谱信息：",
-            json.dumps(recipe, ensure_ascii=False),
+            "JSON schema target:",
+            json.dumps(INGREDIENT_JSON_SCHEMA, ensure_ascii=False),
+            "",
+            "Recipe payload:",
+            json.dumps(compact_payload, ensure_ascii=False),
         ]
     )
 
     messages = [
-        {"role": "system", "content": "你是严谨的菜谱结构化整理助手。"},
+        {
+            "role": "system",
+            "content": "/no_think\nYou are a strict ingredient extraction assistant. Output final valid JSON only. Never output thinking or analysis.",
+        },
         {"role": "user", "content": prompt},
     ]
 
     try:
-        raw_content = _call_ollama_chat(model_name, messages)
+        raw_content = _call_ollama_chat(model_name, messages, response_format=INGREDIENT_JSON_SCHEMA)
     except Exception as error:
         create_ai_conversation_log(
             feature="import_refinement",
@@ -536,10 +679,22 @@ def _generate_refined_ingredients(
         meta={"recipe_name": recipe["name"]},
     )
 
-    parsed = _extract_json_object(raw_content)
-    ingredients = _sanitize_refined_ingredients(parsed.get("ingredients"))
+    parse_error: Optional[Exception] = None
+    ingredients: List[Dict[str, Optional[str]]] = []
+    try:
+        parsed = _extract_json_payload(raw_content)
+        ingredients = _sanitize_refined_ingredients(parsed.get("ingredients"))
+    except Exception as error:
+        parse_error = error
+    if not ingredients:
+        ingredients = _fallback_ingredients_from_source(recipe)
     if not ingredients and (recipe["ingredients_text"] or recipe["ingredients"]):
-        raise ValueError("Model returned no usable ingredient entities")
+        raise RefineGenerationError(
+            "Model did not return usable ingredient entities"
+            if parse_error is not None
+            else "Model returned no usable ingredient entities",
+            raw_response=raw_content,
+        )
     return {"ingredients": ingredients}
 
 
@@ -606,6 +761,45 @@ def _sanitize_refined_ingredients(value: Any) -> List[Dict[str, Optional[str]]]:
             result.append(normalized_item)
 
     return result
+
+
+def _fallback_ingredients_from_source(recipe: Dict[str, Any]) -> List[Dict[str, Optional[str]]]:
+    text = "，".join(
+        part
+        for part in [
+            (recipe.get("ingredients_text") or "").strip(),
+            (recipe.get("seasonings_text") or "").strip(),
+        ]
+        if part
+    )
+    if not text:
+        return []
+
+    raw_parts = [part.strip() for part in FALLBACK_SPLIT_PATTERN.split(text) if part.strip()]
+    if not raw_parts:
+        raw_parts = [text]
+    if len(raw_parts) > 48:
+        return []
+
+    candidates: List[Dict[str, Optional[str]]] = []
+    for raw_part in raw_parts:
+        cleaned_part = re.sub(r"[()??\[\]??].*?[()??\[\]??]?", "", raw_part).strip()
+        if not cleaned_part:
+            continue
+        if len(cleaned_part) > 24:
+            continue
+        candidates.append({"name": cleaned_part, "amount": None, "unit": None, "remark": None})
+
+    sanitized = _sanitize_refined_ingredients(candidates)
+    if sanitized:
+        return sanitized
+
+    if len(raw_parts) == 1 and len(raw_parts[0]) <= 40 and FALLBACK_CHOICE_PATTERN.search(raw_parts[0]):
+        return _sanitize_refined_ingredients(
+            [{"name": raw_parts[0], "amount": None, "unit": None, "remark": None}]
+        )
+
+    return []
 
 
 def _normalize_item_fields(
@@ -796,16 +990,38 @@ def _store_refine_snapshot(
     )
 
 
-def _extract_json_object(raw_text: str) -> Dict[str, Any]:
+def _extract_json_payload(raw_text: str) -> Dict[str, Any]:
     cleaned = (raw_text or "").strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("```", 1)[1]
         cleaned = cleaned.rsplit("```", 1)[0]
         cleaned = cleaned.replace("json", "", 1).strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.S | re.I).strip()
 
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("JSON object not found")
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"ingredients": parsed}
+    except json.JSONDecodeError:
+        pass
 
-    return json.loads(cleaned[start : end + 1])
+    decoder = json.JSONDecoder()
+    last_payload: Optional[Dict[str, Any]] = None
+    for index, char in enumerate(cleaned):
+        if char not in "[{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(cleaned, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            last_payload = parsed
+        elif isinstance(parsed, list):
+            last_payload = {"ingredients": parsed}
+
+    if last_payload is not None:
+        return last_payload
+
+    raise ValueError("JSON payload not found")

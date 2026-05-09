@@ -1,34 +1,44 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 
 class RecipeUpdatePayload(BaseModel):
     name: str = Field(min_length=1)
-    alias: Optional[str] = None
+    record_kind: Optional[str] = "recipe"
+    backlog_status: Optional[str] = None
+    library_section: Optional[str] = None
+    section_name: Optional[str] = None
     category: Optional[str] = None
     cuisine: Optional[str] = None
-    flavor: Optional[str] = None
-    difficulty: Optional[str] = None
-    estimated_time: Optional[int] = None
-    servings: Optional[int] = None
-    tools: Optional[str] = None
+    sub_cuisine: Optional[str] = None
     ingredients_text: Optional[str] = None
+    seasonings_text: Optional[str] = None
     steps_text: Optional[str] = None
     notes_text: Optional[str] = None
+    source_reference: Optional[str] = None
+    last_reviewed_on: Optional[str] = None
+    bmd_flag: bool = False
+    cc_flag: bool = False
+    source_text: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
 
     @field_validator(
         "name",
-        "alias",
+        "record_kind",
+        "backlog_status",
+        "library_section",
+        "section_name",
         "category",
         "cuisine",
-        "flavor",
-        "difficulty",
-        "tools",
+        "sub_cuisine",
         "ingredients_text",
+        "seasonings_text",
         "steps_text",
         "notes_text",
+        "source_reference",
+        "last_reviewed_on",
+        "source_text",
         mode="before",
     )
     @classmethod
@@ -47,11 +57,13 @@ class RecipeUpdatePayload(BaseModel):
             raise ValueError("Recipe name is required")
         return value
 
-    @field_validator("estimated_time", "servings", mode="before")
+    @field_validator("record_kind")
     @classmethod
-    def normalize_numeric_values(cls, value):
-        if value in (None, ""):
-            return None
+    def validate_record_kind(cls, value: Optional[str]):
+        if not value:
+            return "recipe"
+        if value not in {"recipe", "backlog"}:
+            raise ValueError("record_kind must be recipe or backlog")
         return value
 
     @field_validator("tags", mode="before")
@@ -76,3 +88,11 @@ class RecipeUpdatePayload(BaseModel):
                 cleaned.append(normalized)
 
         return cleaned
+
+
+class RecipeEditorRowPayload(BaseModel):
+    values: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecipeEditorCreatePayload(RecipeEditorRowPayload):
+    pass

@@ -1,26 +1,26 @@
 import { useState } from "react";
 
 function isManagementSection(sectionKey) {
-  return ["tagging", "imports", "refineReview", "pairing", "database", "aiLogs"].includes(sectionKey);
+  return ["tagging", "imports", "ingredientAnalysis", "refineReview", "pairing", "database", "aiLogs"].includes(sectionKey);
 }
 
-export default function Sidebar({ health, overview, selectedSection, onSelectSection }) {
+export default function Sidebar({ selectedSection, onSelectSection }) {
   const [managementExpanded, setManagementExpanded] = useState(false);
 
   const primarySections = [
-    { key: "overview", label: "总览" },
-    { key: "recipes", label: "菜谱库" },
-    { key: "ai", label: "智能问答" },
-    { key: "analytics", label: "数据分析" },
+    { key: "analytics", label: "\u603b\u89c8" },
+    { key: "recipes", label: "\u83dc\u8c31\u5e93" },
+    { key: "ai", label: "\u667a\u80fd\u95ee\u7b54" }
   ];
 
   const managementSections = [
     { key: "tagging", label: "标签管理" },
     { key: "imports", label: "导入 Excel" },
-    { key: "refineReview", label: "食材审查" },
+    { key: "ingredientAnalysis", label: "AI 分析食材" },
     { key: "pairing", label: "菜谱配对" },
     { key: "database", label: "查看数据库" },
     { key: "aiLogs", label: "AI 对话记录" },
+    { key: "refineReview", label: "食材审查" }
   ];
 
   return (
@@ -79,27 +79,6 @@ export default function Sidebar({ health, overview, selectedSection, onSelectSec
           ) : null}
         </div>
       </nav>
-
-      <div className="status-card">
-        <div className="status-row">
-          <span>API</span>
-          <strong className={health?.status === "ok" ? "status-ok" : "status-offline"}>
-            {health?.status ?? "unknown"}
-          </strong>
-        </div>
-        <div className="status-row">
-          <span>正式菜谱</span>
-          <strong>{overview?.recipe_count ?? 0}</strong>
-        </div>
-        <div className="status-row">
-          <span>待办项</span>
-          <strong>{overview?.backlog_count ?? 0}</strong>
-        </div>
-        <div className="status-row">
-          <span>专题库</span>
-          <strong>{overview?.library_section_count ?? 0}</strong>
-        </div>
-      </div>
     </aside>
   );
 }

@@ -8,6 +8,15 @@ import {
   updateRefineReview
 } from "../lib/api";
 
+const ISSUE_TYPE_OPTIONS = [
+  { value: "", label: "全部原因" },
+  { value: "model_empty", label: "模型未抽出食材" },
+  { value: "model_format", label: "模型输出格式不稳" },
+  { value: "postprocess_strict", label: "后处理过滤过严" },
+  { value: "source_dirty", label: "原始文本过脏" },
+  { value: "unknown", label: "待判断" }
+];
+
 function formatIngredientAmount(item) {
   const amountPart = [item.amount, item.unit].filter(Boolean).join("");
   const remarkPart = item.remark ? ` / ${item.remark}` : "";
@@ -25,6 +34,10 @@ function reviewStatusLabel(status) {
     return "有问题";
   }
   return "待审查";
+}
+
+function issueTypeLabel(issueType) {
+  return ISSUE_TYPE_OPTIONS.find((item) => item.value === issueType)?.label || "未分类";
 }
 
 function IngredientList({ items, emptyText }) {
@@ -51,20 +64,27 @@ export default function RefineReview() {
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("error");
+  const [issueTypeFilter, setIssueTypeFilter] = useState("");
   const [listLoading, setListLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
+  const [issueTypeDraft, setIssueTypeDraft] = useState("");
 
   async function loadList() {
     setListLoading(true);
     setError("");
     try {
       const [listResult, modelResult] = await Promise.all([
-        fetchRefineReviewItems({ search: search.trim(), status: statusFilter, limit: 200 }),
+        fetchRefineReviewItems({
+          search: search.trim(),
+          status: statusFilter,
+          issueType: issueTypeFilter,
+          limit: 200
+        }),
         fetchLlmModels()
       ]);
       setItems(listResult.items || []);
@@ -85,7 +105,7 @@ export default function RefineReview() {
 
   useEffect(() => {
     loadList();
-  }, [statusFilter]);
+  }, [statusFilter, issueTypeFilter]);
 
   useEffect(() => {
     let active = true;
@@ -94,6 +114,7 @@ export default function RefineReview() {
       if (!selectedRecipeId) {
         setDetail(null);
         setNoteDraft("");
+        setIssueTypeDraft("");
         return;
       }
 
@@ -106,6 +127,7 @@ export default function RefineReview() {
         }
         setDetail(result);
         setNoteDraft(result.review?.note || "");
+        setIssueTypeDraft(result.review?.issue_type || result.derived_issue_type || "");
       } catch (requestError) {
         if (active) {
           setError(requestError.message);
@@ -154,15 +176,18 @@ export default function RefineReview() {
     try {
       const result = await updateRefineReview(selectedRecipeId, {
         status,
+        issue_type: status === "issue" ? issueTypeDraft || null : null,
         note: noteDraft
       });
       setDetail(result);
+      setIssueTypeDraft(result.review?.issue_type || result.derived_issue_type || "");
       setItems((current) =>
         current.map((item) =>
           item.id === selectedRecipeId
             ? {
                 ...item,
                 review_status: result.review.status,
+                issue_type: result.review.issue_type || result.derived_issue_type || "",
                 review_note: result.review.note,
                 review_updated_at: result.review.updated_at
               }
@@ -188,6 +213,7 @@ export default function RefineReview() {
       const result = await rerunRefineReview(selectedRecipeId, selectedModel || undefined);
       setDetail(result);
       setNoteDraft(result.review?.note || "");
+      setIssueTypeDraft(result.review?.issue_type || result.derived_issue_type || "");
       setItems((current) =>
         current.map((item) =>
           item.id === selectedRecipeId
@@ -197,6 +223,8 @@ export default function RefineReview() {
                 refine_version: result.refine_state?.refine_version || item.refine_version,
                 refined_at: result.refine_state?.refined_at || item.refined_at,
                 last_error: result.refine_state?.last_error || "",
+                last_raw_response: result.refine_state?.last_raw_response || "",
+                issue_type: result.review?.issue_type || result.derived_issue_type || "",
                 ingredient_count: result.recipe?.ingredients?.length ?? item.ingredient_count
               }
             : item
@@ -218,8 +246,8 @@ export default function RefineReview() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Structured Ingredient Review</p>
-            <h2>结构化食材审查</h2>
+            <p className="eyebrow">Refine Failure Workbench</p>
+            <h2>食材精校失败样本</h2>
           </div>
         </div>
 
@@ -227,6 +255,10 @@ export default function RefineReview() {
           <div className="detail-stat">
             <span>当前列表</span>
             <strong>{summary.total}</strong>
+          </div>
+          <div className="detail-stat">
+            <span>失败样本</span>
+            <strong>{summary.error}</strong>
           </div>
           <div className="detail-stat">
             <span>待审查</span>
@@ -237,16 +269,12 @@ export default function RefineReview() {
             <strong>{summary.approved}</strong>
           </div>
           <div className="detail-stat">
-            <span>有问题</span>
+            <span>已标问题</span>
             <strong>{summary.issue}</strong>
-          </div>
-          <div className="detail-stat">
-            <span>精校错误</span>
-            <strong>{summary.error}</strong>
           </div>
         </div>
 
-        <div className="filter-bar">
+        <div className="filter-bar filter-bar-wide">
           <label className="search-shell">
             <span>搜索</span>
             <input
@@ -264,11 +292,21 @@ export default function RefineReview() {
           <label className="filter-shell">
             <span>状态</span>
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="error">仅失败</option>
               <option value="all">全部</option>
               <option value="pending">待审查</option>
               <option value="approved">已确认</option>
               <option value="issue">有问题</option>
-              <option value="error">精校错误</option>
+            </select>
+          </label>
+          <label className="filter-shell">
+            <span>失败类型</span>
+            <select value={issueTypeFilter} onChange={(event) => setIssueTypeFilter(event.target.value)}>
+              {ISSUE_TYPE_OPTIONS.map((option) => (
+                <option key={option.value || "all"} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
           </label>
           <button type="button" className="action-button secondary" onClick={loadList} disabled={listLoading || working}>
@@ -279,7 +317,7 @@ export default function RefineReview() {
 
       <div className="history-layout">
         <div className="history-list">
-          {listLoading ? <p className="recipe-meta">正在加载审查列表...</p> : null}
+          {listLoading ? <p className="recipe-meta">正在加载失败样本列表...</p> : null}
           {!listLoading &&
             items.map((item) => (
               <button
@@ -295,8 +333,8 @@ export default function RefineReview() {
                 <p>{[item.library_section, item.section_name].filter(Boolean).join(" / ") || "未归类"}</p>
                 <div className="tag-row compact-tag-row">
                   <span className="tag">{reviewStatusLabel(item.review_status)}</span>
-                  {item.refine_model ? <span className="tag muted">{item.refine_model}</span> : null}
-                  {item.last_error ? <span className="tag muted">有错误</span> : null}
+                  {item.issue_type ? <span className="tag muted">{issueTypeLabel(item.issue_type)}</span> : null}
+                  {item.last_error ? <span className="tag muted">失败</span> : null}
                 </div>
               </button>
             ))}
@@ -312,7 +350,7 @@ export default function RefineReview() {
           {!selectedRecipeId ? (
             <div className="empty-state compact-empty-state">
               <h3>未选择条目</h3>
-              <p>从左侧选择一条菜谱后开始审查。</p>
+              <p>从左侧选择一条失败样本开始审查。</p>
             </div>
           ) : null}
 
@@ -327,7 +365,7 @@ export default function RefineReview() {
               <section className="panel">
                 <div className="panel-header">
                   <div>
-                    <p className="eyebrow">Review Detail</p>
+                    <p className="eyebrow">Failure Detail</p>
                     <h2>{detail.recipe.name}</h2>
                     <p className="recipe-meta">
                       {[detail.recipe.library_section, detail.recipe.section_name, detail.recipe.cuisine]
@@ -337,6 +375,9 @@ export default function RefineReview() {
                   </div>
                   <div className="tag-row compact-tag-row">
                     <span className="tag">{reviewStatusLabel(detail.review.status)}</span>
+                    {detail.review.issue_type || detail.derived_issue_type ? (
+                      <span className="tag muted">{issueTypeLabel(detail.review.issue_type || detail.derived_issue_type)}</span>
+                    ) : null}
                     {detail.refine_state?.model ? <span className="tag muted">{detail.refine_state.model}</span> : null}
                   </div>
                 </div>
@@ -367,9 +408,16 @@ export default function RefineReview() {
                   </section>
                 ) : null}
 
+                {detail.refine_state?.last_raw_response ? (
+                  <section className="detail-section">
+                    <h3>模型原始输出</h3>
+                    <pre className="stream-box">{detail.refine_state.last_raw_response}</pre>
+                  </section>
+                ) : null}
+
                 <section className="detail-section">
                   <h3>原始食材文本</h3>
-                  <p style={{ whiteSpace: "pre-wrap" }}>{detail.recipe.ingredients_text || "未填写"}</p>
+                  <pre className="stream-box">{detail.recipe.ingredients_text || "未填写"}</pre>
                 </section>
 
                 {detail.snapshot ? (
@@ -397,19 +445,20 @@ export default function RefineReview() {
                   <IngredientList items={detail.recipe.ingredients} emptyText="当前没有结构化食材。" />
                 </section>
 
-                <section className="detail-section">
-                  <h3>审查备注</h3>
-                  <textarea
-                    rows={4}
-                    value={noteDraft}
-                    onChange={(event) => setNoteDraft(event.target.value)}
-                    placeholder="记录问题模式、修正规则建议或人工判断。"
-                  />
-                </section>
-
-                <div className="filter-bar">
+                <div className="mapping-grid">
                   <label className="filter-shell">
-                    <span>重跑模型</span>
+                    <span>失败分类</span>
+                    <select value={issueTypeDraft} onChange={(event) => setIssueTypeDraft(event.target.value)}>
+                      {ISSUE_TYPE_OPTIONS.slice(1).map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="filter-shell">
+                    <span>单条重跑模型</span>
                     <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
                       {models.map((item) => (
                         <option key={item.name} value={item.name}>
@@ -420,29 +469,24 @@ export default function RefineReview() {
                   </label>
                 </div>
 
+                <section className="detail-section">
+                  <h3>审查备注</h3>
+                  <textarea
+                    rows={4}
+                    value={noteDraft}
+                    onChange={(event) => setNoteDraft(event.target.value)}
+                    placeholder="记录失败模式、规则建议或人工判断。"
+                  />
+                </section>
+
                 <div className="action-row">
-                  <button
-                    type="button"
-                    className="action-button"
-                    onClick={() => handleMark("approved")}
-                    disabled={working}
-                  >
+                  <button type="button" className="action-button" onClick={() => handleMark("approved")} disabled={working}>
                     标记通过
                   </button>
-                  <button
-                    type="button"
-                    className="action-button secondary"
-                    onClick={() => handleMark("issue")}
-                    disabled={working}
-                  >
+                  <button type="button" className="action-button secondary" onClick={() => handleMark("issue")} disabled={working}>
                     标记有问题
                   </button>
-                  <button
-                    type="button"
-                    className="action-button secondary"
-                    onClick={handleRerun}
-                    disabled={working}
-                  >
+                  <button type="button" className="action-button secondary" onClick={handleRerun} disabled={working}>
                     单条重跑精校
                   </button>
                 </div>

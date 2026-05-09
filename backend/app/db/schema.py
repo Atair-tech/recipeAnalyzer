@@ -8,17 +8,11 @@ SCHEMA_STATEMENTS = [
         source_key TEXT,
         source_hash TEXT,
         last_import_batch_id INTEGER,
-        alias TEXT,
         library_section TEXT,
         section_name TEXT,
         category TEXT,
         cuisine TEXT,
         sub_cuisine TEXT,
-        flavor TEXT,
-        difficulty TEXT,
-        estimated_time INTEGER,
-        servings INTEGER,
-        tools TEXT,
         ingredients_text TEXT,
         seasonings_text TEXT,
         steps_text TEXT,
@@ -38,7 +32,8 @@ SCHEMA_STATEMENTS = [
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         alias TEXT,
-        normalized_name TEXT
+        normalized_name TEXT,
+        is_visible INTEGER NOT NULL DEFAULT 1
     );
     """,
     """
@@ -163,6 +158,7 @@ SCHEMA_STATEMENTS = [
         refined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_run_id INTEGER,
         last_error TEXT,
+        last_raw_response TEXT,
         FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
     );
     """,
@@ -184,9 +180,44 @@ SCHEMA_STATEMENTS = [
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS ingredient_ai_filter_state (
+        ingredient_id INTEGER PRIMARY KEY,
+        source_hash TEXT,
+        model TEXT,
+        filter_version TEXT,
+        filtered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_run_id INTEGER,
+        is_visible INTEGER NOT NULL DEFAULT 1,
+        reason TEXT,
+        last_error TEXT,
+        last_raw_response TEXT,
+        FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE,
+        FOREIGN KEY (last_run_id) REFERENCES ai_ingredient_filter_runs(id) ON DELETE SET NULL
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_ingredient_filter_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        model TEXT NOT NULL,
+        status TEXT NOT NULL,
+        total_count INTEGER NOT NULL DEFAULT 0,
+        processed_count INTEGER NOT NULL DEFAULT 0,
+        kept_count INTEGER NOT NULL DEFAULT 0,
+        hidden_count INTEGER NOT NULL DEFAULT 0,
+        skipped_count INTEGER NOT NULL DEFAULT 0,
+        error_count INTEGER NOT NULL DEFAULT 0,
+        filter_version TEXT,
+        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        completed_at TEXT,
+        error_message TEXT
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS recipe_refine_reviews (
         recipe_id INTEGER PRIMARY KEY,
         status TEXT NOT NULL,
+        issue_type TEXT,
         note TEXT,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE

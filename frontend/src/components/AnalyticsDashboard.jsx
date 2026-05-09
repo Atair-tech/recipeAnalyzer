@@ -1,30 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { fetchAnalyticsSummary } from "../lib/api";
-
-function formatPercent(value) {
-  if (!Number.isFinite(value)) {
-    return "0%";
-  }
-  return `${Math.round(value)}%`;
-}
 
 function SummaryCard({ label, value, note, tone = "default" }) {
   return (
     <article className={`analytics-kpi-card analytics-kpi-card-${tone}`}>
       <span>{label}</span>
       <strong>{value ?? 0}</strong>
-      <p>{note}</p>
-    </article>
-  );
-}
-
-function InsightCard({ label, value, note, eyebrow }) {
-  return (
-    <article className="analytics-insight-card">
-      <span className="analytics-insight-eyebrow">{eyebrow}</span>
-      <strong>{value}</strong>
-      <h3>{label}</h3>
       <p>{note}</p>
     </article>
   );
@@ -40,7 +22,7 @@ function MetricBars({ title, items, emptyText }) {
           <span className="analytics-section-eyebrow">Ranking</span>
           <h3>{title}</h3>
         </div>
-        <span className="analytics-section-note">{items.length} 项</span>
+        <span className="analytics-section-note">{items.length} {"\u9879"}</span>
       </div>
 
       {items.length === 0 ? (
@@ -55,7 +37,9 @@ function MetricBars({ title, items, emptyText }) {
                 <span className="analytics-rank-index">{String(index + 1).padStart(2, "0")}</span>
                 <div className="analytics-rank-copy">
                   <strong>{item.label}</strong>
-                  <span>{item.value} 条记录</span>
+                  <span>
+                    {item.value} {"\u6761\u8bb0\u5f55"}
+                  </span>
                 </div>
               </div>
               <div className="analytics-rank-bar-shell">
@@ -73,6 +57,17 @@ function MetricBars({ title, items, emptyText }) {
       )}
     </section>
   );
+}
+
+function openRecipeEditor() {
+  const editorUrl = `${window.location.origin}${window.location.pathname}#editor`;
+  const opened = window.open(editorUrl, "_blank");
+  if (opened) {
+    opened.opener = null;
+  }
+  if (!opened) {
+    window.location.hash = "editor";
+  }
 }
 
 export default function AnalyticsDashboard({ reloadToken }) {
@@ -114,36 +109,24 @@ export default function AnalyticsDashboard({ reloadToken }) {
   }, [dimension, scope, topN, reloadToken]);
 
   const summary = analytics?.summary ?? {};
-  const chart = analytics?.chart ?? { items: [], dimension_label: "统计维度", scope_label: "全部记录" };
+  const chart = analytics?.chart ?? {
+    items: [],
+    dimension_label: "\u7edf\u8ba1\u7ef4\u5ea6",
+    scope_label: "\u5168\u90e8\u8bb0\u5f55"
+  };
   const options = analytics?.options ?? { dimensions: [], scopes: [] };
 
-  const derived = useMemo(() => {
-    const items = chart.items ?? [];
-    const totalValue = items.reduce((sum, item) => sum + item.value, 0);
-    const topItem = items[0] ?? null;
-    const tailItem = items[items.length - 1] ?? null;
-    const average = items.length > 0 ? totalValue / items.length : 0;
-
-    return {
-      totalValue,
-      topItem,
-      tailItem,
-      average,
-      focusRate: totalValue > 0 && topItem ? (topItem.value / totalValue) * 100 : 0
-    };
-  }, [chart.items]);
-
-  if (loading) {
+  if (loading && !analytics) {
     return (
       <section className="panel analytics-dashboard-panel">
         <div className="empty-state compact-empty-state">
-          <h3>加载数据分析中</h3>
+          <h3>{"\u52a0\u8f7d\u6570\u636e\u5206\u6790\u4e2d..."}</h3>
         </div>
       </section>
     );
   }
 
-  if (error) {
+  if (error && !analytics) {
     return (
       <section className="panel analytics-dashboard-panel">
         <div className="error-banner">{error}</div>
@@ -156,43 +139,59 @@ export default function AnalyticsDashboard({ reloadToken }) {
       <div className="analytics-hero">
         <div className="analytics-hero-copy">
           <span className="analytics-hero-eyebrow">Insight Workspace</span>
-          <h2>数据分析总览</h2>
-          <p>
-            当前正在查看 <strong>{chart.dimension_label}</strong> 在 <strong>{chart.scope_label}</strong> 范围下的分布。
-          </p>
+          <h2>{"\u83dc\u8c31\u5e93\u603b\u89c8"}</h2>
         </div>
-        <div className="analytics-hero-metrics">
-          <div className="analytics-hero-pill">
-            <span>Top 1 占比</span>
-            <strong>{formatPercent(derived.focusRate)}</strong>
-          </div>
-          <div className="analytics-hero-pill">
-            <span>维度项数</span>
-            <strong>{chart.items.length}</strong>
-          </div>
-        </div>
+        <button type="button" className="action-button analytics-editor-button" onClick={openRecipeEditor}>
+          编辑模式
+        </button>
       </div>
 
       <div className="analytics-kpi-grid">
-        <SummaryCard label="正式菜谱" value={summary.recipe_count} note="当前库里的正式菜谱记录数" tone="accent" />
-        <SummaryCard label="待办项" value={summary.backlog_count} note="待挑战和待记录条目数" />
-        <SummaryCard label="专题库" value={summary.library_section_count} note="来源于工作簿的顶层专题数" />
-        <SummaryCard label="有做法记录" value={summary.record_with_method_count} note="包含做法文本的记录数" />
-        <SummaryCard label="结构化食材" value={summary.ingredient_count} note="可用于筛选和统计的食材词典数" />
-        <SummaryCard label="同步批次" value={summary.import_batch_count} note="已保留的导入批次数" />
+        <SummaryCard
+          label={"\u6b63\u5f0f\u83dc\u8c31"}
+          value={summary.recipe_count}
+          note={"\u5f53\u524d\u5e93\u4e2d\u7684\u6b63\u5f0f\u83dc\u8c31\u8bb0\u5f55\u6570"}
+          tone="accent"
+        />
+        <SummaryCard
+          label={"\u5f85\u529e\u9879"}
+          value={summary.backlog_count}
+          note={"\u5f85\u6311\u6218\u548c\u5f85\u8bb0\u5f55\u6761\u76ee\u6570"}
+        />
+        <SummaryCard
+          label={"\u4e13\u9898\u5e93"}
+          value={summary.library_section_count}
+          note={"\u6765\u6e90\u4e8e\u5de5\u4f5c\u7c3f\u7684\u9876\u5c42\u4e13\u9898\u6570"}
+        />
+        <SummaryCard
+          label={"\u6709\u505a\u6cd5\u8bb0\u5f55"}
+          value={summary.record_with_method_count}
+          note={"\u5305\u542b\u505a\u6cd5\u6587\u672c\u7684\u8bb0\u5f55\u6570"}
+        />
+        <SummaryCard
+          label={"\u7ed3\u6784\u5316\u98df\u6750"}
+          value={summary.ingredient_count}
+          note={"\u53ef\u7528\u4e8e\u7b5b\u9009\u548c\u7edf\u8ba1\u7684\u98df\u6750\u8bcd\u5178\u6570"}
+        />
+        <SummaryCard
+          label={"\u540c\u6b65\u6279\u6b21"}
+          value={summary.import_batch_count}
+          note={"\u5df2\u4fdd\u7559\u7684\u5bfc\u5165\u6279\u6b21\u6570"}
+        />
       </div>
 
       <section className="analytics-control-panel">
         <div className="analytics-control-header">
           <div>
             <span className="analytics-section-eyebrow">Control Panel</span>
-            <h3>分析视角</h3>
+            <h3>{"\u5206\u6790\u89c6\u89d2"}</h3>
           </div>
+          {loading ? <span className="inline-status-note analytics-updating-note">正在更新图表...</span> : null}
         </div>
 
         <div className="filter-bar analytics-filter-bar analytics-filter-bar-dashboard">
           <label className="filter-shell">
-            <span>统计维度</span>
+            <span>{"\u7edf\u8ba1\u7ef4\u5ea6"}</span>
             <select value={dimension} onChange={(event) => setDimension(event.target.value)}>
               {options.dimensions.map((item) => (
                 <option key={item.value} value={item.value}>
@@ -203,7 +202,7 @@ export default function AnalyticsDashboard({ reloadToken }) {
           </label>
 
           <label className="filter-shell">
-            <span>统计范围</span>
+            <span>{"\u7edf\u8ba1\u8303\u56f4"}</span>
             <select value={scope} onChange={(event) => setScope(event.target.value)}>
               {options.scopes.map((item) => (
                 <option key={item.value} value={item.value}>
@@ -214,7 +213,7 @@ export default function AnalyticsDashboard({ reloadToken }) {
           </label>
 
           <label className="filter-shell">
-            <span>显示条数</span>
+            <span>{"\u663e\u793a\u6761\u6570"}</span>
             <select value={String(topN)} onChange={(event) => setTopN(Number(event.target.value))}>
               {[8, 10, 12, 15, 20, 30].map((value) => (
                 <option key={value} value={value}>
@@ -226,33 +225,14 @@ export default function AnalyticsDashboard({ reloadToken }) {
         </div>
       </section>
 
+      {error ? <div className="error-banner">{error}</div> : null}
+
       <div className="analytics-dashboard-grid">
         <MetricBars
           title={`${chart.dimension_label} / ${chart.scope_label}`}
           items={chart.items}
-          emptyText="当前条件下没有可展示的数据。"
+          emptyText={"\u5f53\u524d\u6761\u4ef6\u4e0b\u6ca1\u6709\u53ef\u5c55\u793a\u7684\u6570\u636e\u3002"}
         />
-
-        <aside className="analytics-insight-stack">
-          <InsightCard
-            eyebrow="Leading Segment"
-            label={derived.topItem?.label ?? "暂无数据"}
-            value={derived.topItem?.value ?? 0}
-            note={derived.topItem ? `当前排名第一，约占已展示分布的 ${formatPercent(derived.focusRate)}。` : "当前筛选下没有命中的维度项。"}
-          />
-          <InsightCard
-            eyebrow="Average"
-            label="平均分布密度"
-            value={derived.average ? derived.average.toFixed(1) : "0.0"}
-            note="已展示项目的平均记录数，可用于判断分布是否集中。"
-          />
-          <InsightCard
-            eyebrow="Tail Segment"
-            label={derived.tailItem?.label ?? "暂无数据"}
-            value={derived.tailItem?.value ?? 0}
-            note={derived.tailItem ? "当前已展示列表中的尾部项。适合排查长尾分布。" : "没有可供比较的尾部项。"}
-          />
-        </aside>
       </div>
     </section>
   );

@@ -331,7 +331,6 @@ def _parse_dessert_sheet(rows: List[Dict[str, Any]]) -> List[ParsedRecord]:
             source_key=f"recipe|{DESSERT_SHEET}|{_stable_name_key(name)}",
             record_kind="recipe",
             backlog_status=None,
-            alias=None,
             library_section=DESSERT_SHEET,
             section_name=current_section,
             category=current_section,
@@ -385,7 +384,6 @@ def _parse_backlog_sheet(rows: List[Dict[str, Any]]) -> List[ParsedRecord]:
                 source_key=f"backlog|{status}|{_stable_name_key(name)}",
                 record_kind="backlog",
                 backlog_status=status,
-                alias=None,
                 library_section=BACKLOG_SHEET,
                 section_name=status,
                 category=status,
@@ -431,7 +429,6 @@ def _build_recipe_record(
     detail_item: Optional[Dict[str, Any]],
 ) -> ParsedRecord:
     display_name = (index_item or {}).get("name") or (detail_item or {}).get("name") or "未命名菜谱"
-    alias = _build_alias(index_item, detail_item)
     section_name = (index_item or {}).get("section_name") or (detail_item or {}).get("section_name")
     notes = []
     if index_item is None:
@@ -445,7 +442,6 @@ def _build_recipe_record(
         source_key=f"recipe|{base_section}|{match_key}",
         record_kind="recipe",
         backlog_status=None,
-        alias=alias,
         library_section=base_section,
         section_name=section_name,
         category=section_name,
@@ -713,17 +709,11 @@ def _base_recipe_payload(**kwargs) -> Dict[str, Any]:
         "name": kwargs["name"],
         "record_kind": kwargs["record_kind"],
         "backlog_status": kwargs["backlog_status"],
-        "alias": kwargs["alias"],
         "library_section": kwargs["library_section"],
         "section_name": kwargs["section_name"],
         "category": kwargs["category"],
         "cuisine": kwargs["cuisine"],
         "sub_cuisine": kwargs["sub_cuisine"],
-        "flavor": None,
-        "difficulty": None,
-        "estimated_time": None,
-        "servings": None,
-        "tools": None,
         "ingredients_text": kwargs["ingredients_text"],
         "seasonings_text": kwargs["seasonings_text"],
         "steps_text": kwargs["steps_text"],
@@ -774,15 +764,6 @@ def _import_fields() -> List[Dict[str, str]]:
         {"key": "steps_text", "label": "做法及要点"},
         {"key": "notes_text", "label": "系统备注"},
     ]
-
-
-def _build_alias(index_item: Optional[Dict[str, Any]], detail_item: Optional[Dict[str, Any]]) -> Optional[str]:
-    names = [item["name"] for item in (index_item, detail_item) if item and item.get("name")]
-    if len(names) < 2:
-        return None
-    if names[0] == names[1]:
-        return None
-    return names[1]
 
 
 def _match_key_for_source(

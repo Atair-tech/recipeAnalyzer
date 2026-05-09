@@ -33,6 +33,19 @@ def get_database_export_info() -> dict:
     }
 
 
+def export_database_to_downloads() -> dict:
+    export_info = get_database_export_info()
+    downloads_dir = _resolve_downloads_dir()
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    destination = _unique_destination(downloads_dir / export_info["file_name"])
+    shutil.copy2(export_info["path"], destination)
+    return {
+        "status": "ok",
+        "file_name": destination.name,
+        "path": str(destination),
+    }
+
+
 def import_database_file(upload: UploadFile) -> dict:
     suffix = Path(upload.filename or "database.db").suffix.lower() or ".db"
     if suffix not in {".db", ".sqlite", ".sqlite3"}:
@@ -64,6 +77,28 @@ def import_database_file(upload: UploadFile) -> dict:
         "database_file": database_path.name,
         "backup_file": backup_path.name if backup_path else None,
     }
+
+
+def _resolve_downloads_dir() -> Path:
+    home = Path.home()
+    candidates = [home / "Downloads", home / "下载"]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return home / "Downloads"
+
+
+def _unique_destination(path: Path) -> Path:
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{stem}_{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError("Unable to allocate a unique export file name")
 
 
 def _write_upload_to_tempfile(upload: UploadFile, suffix: str) -> Path:

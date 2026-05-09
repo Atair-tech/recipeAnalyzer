@@ -107,8 +107,8 @@ export default function DatabaseBrowser() {
     setError("");
     setSuccessMessage("");
     try {
-      await exportDatabase();
-      setSuccessMessage("数据库下载已开始。");
+      const result = await exportDatabase();
+      setSuccessMessage(result?.path ? `数据库已导出到：${result.path}` : "数据库下载已开始。");
     } catch (requestError) {
       setError(requestError.message);
     } finally {

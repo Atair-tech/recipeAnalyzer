@@ -17,6 +17,12 @@ from app.services.import_refine_service import (
     resume_refine_run,
     start_refine_run,
 )
+from app.services.ingredient_visibility_service import (
+    get_ingredient_filter_status,
+    pause_ingredient_filter_run,
+    resume_ingredient_filter_run,
+    start_ingredient_filter_run,
+)
 from app.services.refine_review_service import (
     get_refine_review_detail,
     list_refine_review_items,
@@ -30,10 +36,12 @@ router = APIRouter()
 
 class ImportRefineStartPayload(BaseModel):
     model: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class RefineReviewUpdatePayload(BaseModel):
     status: str
+    issue_type: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -114,13 +122,40 @@ def import_refine_resume():
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+@router.get("/imports/ingredient-filter/status")
+def ingredient_filter_status():
+    return get_ingredient_filter_status()
+
+
+@router.post("/imports/ingredient-filter/start")
+def ingredient_filter_start(payload: ImportRefineStartPayload):
+    try:
+        return start_ingredient_filter_run(payload.model, provider=payload.provider)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/imports/ingredient-filter/pause")
+def ingredient_filter_pause():
+    return pause_ingredient_filter_run()
+
+
+@router.post("/imports/ingredient-filter/resume")
+def ingredient_filter_resume():
+    try:
+        return resume_ingredient_filter_run()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @router.get("/imports/refine/review")
 def import_refine_review_list(
     search: Optional[str] = None,
     status: str = "all",
+    issue_type: Optional[str] = None,
     limit: int = 200,
 ):
-    return list_refine_review_items(search=search, status=status, limit=limit)
+    return list_refine_review_items(search=search, status=status, issue_type=issue_type, limit=limit)
 
 
 @router.get("/imports/refine/review/{recipe_id}")
@@ -134,7 +169,12 @@ def import_refine_review_detail(recipe_id: int):
 @router.put("/imports/refine/review/{recipe_id}")
 def import_refine_review_update(recipe_id: int, payload: RefineReviewUpdatePayload):
     try:
-        return update_refine_review(recipe_id=recipe_id, status=payload.status, note=payload.note)
+        return update_refine_review(
+            recipe_id=recipe_id,
+            status=payload.status,
+            note=payload.note,
+            issue_type=payload.issue_type,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

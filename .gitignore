@@ -1,4 +1,7 @@
 .venv/
+.env
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -11,13 +14,27 @@ frontend/dist/
 .vite/
 dist/
 build/
+src-tauri/target/
+src-tauri/binaries/*.exe
+desktop/tauri_backend/build/
 
 data/*.db
 data/*.db-*
 data/*.xlsx
 data/*.xls
 data/runtime/
+data/backups/
+data/*.log
 !data/.gitkeep
+
+logs/
+miniappoutput/
+/resource/
+rust/
+*.csv
+*.xlsx
+*.xls
+~$*
 
 .DS_Store
 Thumbs.db
