@@ -1,7 +1,7 @@
 {
   "name": "recipe-analyzer-desktop",
   "private": true,
-  "version": "0.1.27",
+  "version": "0.1.28",
   "scripts": {
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",

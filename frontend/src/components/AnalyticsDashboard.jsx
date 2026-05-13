@@ -59,7 +59,46 @@ function MetricBars({ title, items, emptyText }) {
   );
 }
 
-function openRecipeEditor() {
+function isTauriRuntime() {
+  return Boolean(
+    typeof window !== "undefined" &&
+      (window.__TAURI_INTERNALS__ ||
+        window.location.protocol === "tauri:" ||
+        window.location.hostname === "tauri.localhost")
+  );
+}
+
+async function openRecipeEditor() {
+  if (isTauriRuntime()) {
+    try {
+      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      const existingEditor = await WebviewWindow.getByLabel("recipe-editor");
+      if (existingEditor) {
+        await existingEditor.show();
+        await existingEditor.setFocus();
+        return;
+      }
+
+      const editorWindow = new WebviewWindow("recipe-editor", {
+        url: "/#editor",
+        title: "菜谱编辑模式",
+        width: 1440,
+        height: 920,
+        minWidth: 1100,
+        minHeight: 760,
+        resizable: true,
+        focus: true
+      });
+      editorWindow.once("tauri://error", (event) => {
+        window.alert(`无法打开编辑模式窗口：${event.payload || "未知错误"}`);
+      });
+      return;
+    } catch (error) {
+      window.alert(`无法打开编辑模式窗口：${error?.message || String(error)}`);
+      return;
+    }
+  }
+
   const editorUrl = `${window.location.origin}${window.location.pathname}#editor`;
   const opened = window.open(editorUrl, "_blank");
   if (opened) {

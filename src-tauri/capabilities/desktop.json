@@ -6,9 +6,13 @@
     "linux"
   ],
   "windows": [
-    "main"
+    "main",
+    "recipe-editor"
   ],
   "permissions": [
+    "core:window:allow-create",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
     "process:default",
     "updater:default"
   ]
