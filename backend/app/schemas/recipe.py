@@ -96,3 +96,19 @@ class RecipeEditorRowPayload(BaseModel):
 
 class RecipeEditorCreatePayload(RecipeEditorRowPayload):
     pass
+
+
+class TableEditorRowsPayload(BaseModel):
+    table: str = Field(min_length=1)
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class TableEditorSqlPayload(BaseModel):
+    sql: str = Field(min_length=1)
+
+
+class TableEditorApplyPayload(BaseModel):
+    table: str = Field(min_length=1)
+    changes: List[Dict[str, Any]] = Field(default_factory=list)

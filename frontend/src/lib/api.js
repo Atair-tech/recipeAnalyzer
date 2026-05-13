@@ -466,6 +466,40 @@ export function fetchRecipeEditorSchema() {
   return request("/recipes/editor/schema");
 }
 
+export function fetchRecipeEditorTables() {
+  return request("/recipes/editor/tables");
+}
+
+export function fetchRecipeEditorTableRows({ table, filters = {}, limit = 100, offset = 0 }) {
+  return request("/recipes/editor/table-rows", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ table, filters, limit, offset })
+  });
+}
+
+export function executeRecipeEditorSql(sql) {
+  return request("/recipes/editor/sql", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ sql })
+  });
+}
+
+export function applyRecipeEditorTableChanges({ table, changes }) {
+  return request("/recipes/editor/apply", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ table, changes })
+  });
+}
+
 export function fetchRecipeEditorRows() {
   return request("/recipes/editor/rows");
 }

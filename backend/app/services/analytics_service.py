@@ -31,7 +31,7 @@ CHART_DIMENSIONS = {
     },
     "ingredient": {
         "label": "食材分布",
-        "sql": "COALESCE(NULLIF(TRIM(COALESCE(i.normalized_name, i.name)), ''), '未标注')",
+        "sql": "COALESCE(NULLIF(TRIM(i.normalized_name), ''), '未标注')",
         "joins": "LEFT JOIN recipe_ingredients AS ri ON ri.recipe_id = r.id LEFT JOIN ingredients AS i ON i.id = ri.ingredient_id",
     },
 }
@@ -101,7 +101,7 @@ def _load_chart_rows(connection, dimension: str, scope: str, top_n: int):
         where_clauses.append("mt.name IS NOT NULL")
     if dimension == "ingredient":
         where_clauses.append("i.is_visible = 1")
-        where_clauses.append("COALESCE(i.normalized_name, i.name) IS NOT NULL")
+        where_clauses.append("i.normalized_name IS NOT NULL")
 
     where_sql = f"WHERE {' AND '.join(f'({item})' for item in where_clauses)}" if where_clauses else ""
     group_by_expression = "label" if dimension in {"tag", "ingredient"} else config["sql"]

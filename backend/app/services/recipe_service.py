@@ -35,6 +35,41 @@ RECIPE_EDITOR_FIELDS = [
     {"key": "ingredient_names", "label": "主料/标准食材(参考)", "type": "readonly", "editable": False, "required": False},
 ]
 
+TABLE_EDITOR_EXCLUDED_PREFIXES = ("recipe_search", "sqlite_")
+TABLE_EDITOR_EXCLUDED_TABLES = {
+    "recipe_search",
+    "recipe_search_config",
+    "recipe_search_content",
+    "recipe_search_data",
+    "recipe_search_docsize",
+    "recipe_search_idx",
+}
+
+TABLE_EDITOR_LABELS = {
+    "recipes": "recipes 菜谱主表",
+    "ingredients": "ingredients 标准食材",
+    "ingredient_aliases": "ingredient_aliases 食材别名",
+    "recipe_ingredients": "recipe_ingredients 菜谱-食材",
+    "managed_tags": "managed_tags 管理标签",
+    "recipe_managed_tags": "recipe_managed_tags 菜谱-管理标签",
+    "tags": "tags 旧标签",
+    "recipe_tags": "recipe_tags 旧菜谱标签",
+    "import_batches": "import_batches 导入批次",
+    "raw_import_rows": "raw_import_rows 原始导入行",
+    "ai_conversation_logs": "ai_conversation_logs AI日志",
+    "ai_refine_runs": "ai_refine_runs 食材分析批次",
+    "recipe_ai_refine_state": "recipe_ai_refine_state 食材分析状态",
+    "recipe_refine_snapshots": "recipe_refine_snapshots 食材分析快照",
+    "recipe_refine_reviews": "recipe_refine_reviews 食材审核",
+    "ai_ingredient_filter_runs": "ai_ingredient_filter_runs 食材过滤批次",
+    "ingredient_ai_filter_state": "ingredient_ai_filter_state 食材过滤状态",
+    "ai_tagging_runs": "ai_tagging_runs 自动标签批次",
+    "recipe_ai_tag_state": "recipe_ai_tag_state 自动标签状态",
+    "recipe_pair_overrides": "recipe_pair_overrides 配对修正",
+}
+
+SQL_EDITOR_BLOCKED_PREFIXES = ("attach", "detach")
+
 EDITABLE_RECIPE_COLUMNS = {
     "name",
     "record_kind",
@@ -263,12 +298,12 @@ def get_recipe_filters() -> Dict[str, Any]:
         ).fetchall()
         ingredient_rows = connection.execute(
             """
-            SELECT DISTINCT COALESCE(i.normalized_name, i.name) AS ingredient_name
+            SELECT DISTINCT i.normalized_name AS ingredient_name
             FROM recipe_ingredients AS ri
             INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
             WHERE i.is_visible = 1
-              AND COALESCE(i.normalized_name, i.name) IS NOT NULL
-              AND TRIM(COALESCE(i.normalized_name, i.name)) <> ''
+              AND i.normalized_name IS NOT NULL
+              AND TRIM(i.normalized_name) <> ''
             ORDER BY ingredient_name
             """
         ).fetchall()
@@ -386,11 +421,11 @@ def get_recipe_editor_schema() -> Dict[str, Any]:
         ).fetchall()
         ingredient_rows = connection.execute(
             """
-            SELECT DISTINCT COALESCE(normalized_name, name) AS value
+            SELECT DISTINCT normalized_name AS value
             FROM ingredients
             WHERE is_visible = 1
-              AND COALESCE(normalized_name, name) IS NOT NULL
-              AND TRIM(COALESCE(normalized_name, name)) <> ''
+              AND normalized_name IS NOT NULL
+              AND TRIM(normalized_name) <> ''
             ORDER BY value
             """
         ).fetchall()
@@ -436,7 +471,7 @@ def list_recipe_editor_rows() -> List[Dict[str, Any]]:
                 r.updated_at,
                 GROUP_CONCAT(DISTINCT t.name) AS tags_text,
                 GROUP_CONCAT(DISTINCT mt.name) AS managed_tags_text,
-                GROUP_CONCAT(DISTINCT COALESCE(i.normalized_name, i.name)) AS ingredient_names
+                GROUP_CONCAT(DISTINCT i.normalized_name) AS ingredient_names
             FROM recipes AS r
             LEFT JOIN recipe_tags AS rt ON rt.recipe_id = r.id
             LEFT JOIN tags AS t ON t.id = rt.tag_id
@@ -454,6 +489,189 @@ def list_recipe_editor_rows() -> List[Dict[str, Any]]:
         ).fetchall()
 
     return [_format_editor_row(row) for row in rows]
+
+
+def get_table_editor_schema() -> Dict[str, Any]:
+    with get_connection() as connection:
+        table_rows = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """
+        ).fetchall()
+
+        tables = []
+        for row in table_rows:
+            table_name = row["name"]
+            if table_name in TABLE_EDITOR_EXCLUDED_TABLES or table_name.startswith(TABLE_EDITOR_EXCLUDED_PREFIXES):
+                continue
+            columns = _get_table_editor_columns(connection, table_name)
+            if not columns:
+                continue
+            count = connection.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+            tables.append(
+                {
+                    "name": table_name,
+                    "label": TABLE_EDITOR_LABELS.get(table_name, table_name),
+                    "row_count": count,
+                    "columns": columns,
+                }
+            )
+
+    return {
+        "tables": tables,
+        "default_table": "recipes" if any(table["name"] == "recipes" for table in tables) else (tables[0]["name"] if tables else ""),
+    }
+
+
+def list_table_editor_rows(table: str, filters: Dict[str, Any], limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+    schema = get_table_editor_schema()
+    table_map = {item["name"]: item for item in schema["tables"]}
+    table_info = table_map.get(table)
+    if table_info is None:
+        raise ValueError("不支持浏览该表")
+
+    columns = table_info["columns"]
+    column_names = [column["name"] for column in columns]
+    where_sql, params = _build_table_editor_filters(filters, column_names)
+    order_sql = _build_table_editor_order(columns)
+    safe_limit = max(1, min(int(limit or 100), 500))
+    safe_offset = max(0, int(offset or 0))
+
+    select_columns = ", ".join(f'"{column}"' for column in column_names)
+    with get_connection() as connection:
+        total = connection.execute(
+            f'SELECT COUNT(*) FROM "{table}" {where_sql}',
+            params,
+        ).fetchone()[0]
+        rows = connection.execute(
+            f"""
+            SELECT {select_columns}
+            FROM "{table}"
+            {where_sql}
+            {order_sql}
+            LIMIT ? OFFSET ?
+            """,
+            [*params, safe_limit, safe_offset],
+        ).fetchall()
+
+    return {
+        "table": table,
+        "columns": columns,
+        "items": [_serialize_table_editor_row(row, column_names) for row in rows],
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
+
+
+def execute_table_editor_sql(sql: str) -> Dict[str, Any]:
+    statement = (sql or "").strip()
+    if not statement:
+        raise ValueError("SQL 不能为空")
+
+    lowered = statement.lstrip().lower()
+    first_word = lowered.split(None, 1)[0].rstrip(";") if lowered else ""
+    if first_word in SQL_EDITOR_BLOCKED_PREFIXES:
+        raise ValueError("出于安全原因，编辑器不允许执行 ATTACH/DETACH")
+
+    with get_connection() as connection:
+        try:
+            cursor = connection.execute(statement)
+            if cursor.description:
+                columns = [column[0] for column in cursor.description]
+                rows = cursor.fetchmany(500)
+                truncated = cursor.fetchone() is not None
+                return {
+                    "kind": "rows",
+                    "columns": columns,
+                    "items": [_serialize_sql_result_row(row, columns) for row in rows],
+                    "row_count": len(rows),
+                    "truncated": truncated,
+                    "message": f"返回 {len(rows)} 行" + ("；结果超过 500 行，已截断" if truncated else ""),
+                }
+
+            connection.commit()
+            affected = cursor.rowcount if cursor.rowcount is not None else -1
+            return {
+                "kind": "message",
+                "columns": [],
+                "items": [],
+                "row_count": 0,
+                "affected_rows": affected,
+                "message": f"执行完成，影响行数：{affected if affected >= 0 else '未知'}",
+            }
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def apply_table_editor_changes(table: str, changes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not changes:
+        return {"updated_rows": 0, "updated_cells": 0, "message": "没有需要写入的更改"}
+
+    schema = get_table_editor_schema()
+    table_map = {item["name"]: item for item in schema["tables"]}
+    table_info = table_map.get(table)
+    if table_info is None:
+        raise ValueError("不支持编辑该表")
+
+    columns = table_info["columns"]
+    column_names = {column["name"] for column in columns}
+    primary_columns = [column["name"] for column in columns if column.get("primary_key")]
+    if not primary_columns:
+        raise ValueError("该表没有主键，不能安全写入更改")
+
+    updated_rows = 0
+    updated_cells = 0
+    with get_connection() as connection:
+        try:
+            for change in changes:
+                pk_values = change.get("pk") or {}
+                values = change.get("values") or {}
+                if not values:
+                    continue
+                if any(column not in pk_values for column in primary_columns):
+                    raise ValueError("更改缺少主键，不能写入")
+
+                update_columns = [
+                    column
+                    for column in values
+                    if column in column_names and column not in primary_columns
+                ]
+                if not update_columns:
+                    continue
+
+                set_sql = ", ".join(f'"{column}" = ?' for column in update_columns)
+                where_sql = " AND ".join(f'"{column}" = ?' for column in primary_columns)
+                params = [
+                    _coerce_table_editor_value(values[column])
+                    for column in update_columns
+                ]
+                params.extend(pk_values[column] for column in primary_columns)
+                cursor = connection.execute(
+                    f'UPDATE "{table}" SET {set_sql} WHERE {where_sql}',
+                    params,
+                )
+                if cursor.rowcount:
+                    updated_rows += cursor.rowcount
+                    updated_cells += len(update_columns)
+
+            if table == "recipes":
+                rebuild_recipe_search_index(connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    return {
+        "updated_rows": updated_rows,
+        "updated_cells": updated_cells,
+        "message": f"已写入 {updated_cells} 个单元格，影响 {updated_rows} 行",
+    }
 
 
 def create_recipe_editor_row(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -565,7 +783,7 @@ def get_recipe(recipe_id: int) -> Optional[Dict[str, Any]]:
 
     ingredients_query = """
         SELECT
-            i.name,
+            i.normalized_name AS name,
             ri.amount,
             ri.unit,
             ri.remark
@@ -823,13 +1041,17 @@ def _build_recipe_filters(
                   AND filter_i.is_visible = 1
                   AND (
                     filter_i.normalized_name = ?
-                    OR filter_i.name = ?
-                    OR COALESCE(filter_i.alias, '') = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM ingredient_aliases AS filter_alias
+                        WHERE filter_alias.ingredient_id = filter_i.id
+                          AND filter_alias.alias_name = ?
+                    )
                   )
             )
             """
         )
-        params.extend([normalized_ingredient, normalized_ingredient, normalized_ingredient])
+        params.extend([normalized_ingredient, normalized_ingredient])
 
     if tag:
         normalized_tag = tag.strip()
@@ -918,6 +1140,84 @@ def _format_editor_row(row) -> Dict[str, Any]:
     item["managed_tags_text"] = row["managed_tags_text"] or ""
     item["ingredient_names"] = row["ingredient_names"] or ""
     return item
+
+
+def _get_table_editor_columns(connection, table_name: str) -> List[Dict[str, Any]]:
+    rows = connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    return [
+        {
+            "name": row["name"],
+            "type": row["type"] or "",
+            "notnull": bool(row["notnull"]),
+            "primary_key": bool(row["pk"]),
+            "default": row["dflt_value"],
+        }
+        for row in rows
+    ]
+
+
+def _build_table_editor_filters(filters: Dict[str, Any], column_names: List[str]) -> Tuple[str, List[Any]]:
+    clauses: List[str] = []
+    params: List[Any] = []
+    allowed_columns = set(column_names)
+
+    for column_name in column_names:
+        raw_value = filters.get(column_name)
+        if raw_value is None:
+            continue
+        filter_value = str(raw_value).strip()
+        if not filter_value:
+            continue
+        if column_name not in allowed_columns:
+            continue
+        if filter_value.upper() == "NULL":
+            clauses.append(f'"{column_name}" IS NULL')
+            continue
+        clauses.append(f'CAST("{column_name}" AS TEXT) LIKE ?')
+        params.append(f"%{filter_value}%")
+
+    if not clauses:
+        return "", []
+    return "WHERE " + " AND ".join(clauses), params
+
+
+def _build_table_editor_order(columns: List[Dict[str, Any]]) -> str:
+    primary_columns = [column["name"] for column in columns if column.get("primary_key")]
+    if primary_columns:
+        order_columns = primary_columns
+    elif any(column["name"] == "id" for column in columns):
+        order_columns = ["id"]
+    else:
+        return ""
+    return "ORDER BY " + ", ".join(f'"{column}"' for column in order_columns)
+
+
+def _serialize_table_editor_row(row, column_names: List[str]) -> Dict[str, Any]:
+    item: Dict[str, Any] = {}
+    for column_name in column_names:
+        value = row[column_name]
+        if isinstance(value, bytes):
+            item[column_name] = f"<BLOB {len(value)} bytes>"
+        else:
+            item[column_name] = value
+    return item
+
+
+def _serialize_sql_result_row(row, column_names: List[str]) -> Dict[str, Any]:
+    item: Dict[str, Any] = {}
+    for index, column_name in enumerate(column_names):
+        value = row[index]
+        if isinstance(value, bytes):
+            item[column_name] = f"<BLOB {len(value)} bytes>"
+        else:
+            item[column_name] = value
+    return item
+
+
+def _coerce_table_editor_value(value: Any) -> Any:
+    if isinstance(value, str) and value.upper() == "NULL":
+        return None
+    return value
 
 
 def _normalize_editor_values(values: Dict[str, Any]) -> Dict[str, Any]:

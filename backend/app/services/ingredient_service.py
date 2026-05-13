@@ -12,6 +12,7 @@ INGREDIENT_ALIAS_MAP = {
     "蛋液": "鸡蛋",
     "可生食鸡蛋": "鸡蛋",
     "小葱": "葱",
+    "小葱花": "葱",
     "香葱": "葱",
     "大葱": "葱",
     "青葱": "葱",
@@ -202,6 +203,10 @@ ARABIC_NUMBER_PATTERN = r"\d+(?:\.\d+)?(?:/\d+)?(?:-\d+(?:\.\d+)?)?"
 CHINESE_NUMBER_PATTERN = r"[一二三四五六七八九十两半几]+"
 AMOUNT_TOKEN_PATTERN = rf"(?:{ARABIC_NUMBER_PATTERN}|{CHINESE_NUMBER_PATTERN}|适量|少许|少量|若干|按需)"
 UNIT_PATTERN = "|".join(sorted((re.escape(unit) for unit in KNOWN_UNITS), key=len, reverse=True))
+UNIT_AMOUNT_PATTERN = re.compile(
+    rf"^(?P<amount>{ARABIC_NUMBER_PATTERN}|{CHINESE_NUMBER_PATTERN})(?P<unit>{UNIT_PATTERN})$",
+    re.I,
+)
 PREFIX_PATTERN = re.compile(rf"^(?P<amount>{AMOUNT_TOKEN_PATTERN})(?P<unit>{UNIT_PATTERN})?(?P<name>.+)$")
 SUFFIX_PATTERN = re.compile(rf"^(?P<name>.+?)(?P<amount>{AMOUNT_TOKEN_PATTERN})(?P<unit>{UNIT_PATTERN})$")
 SPACE_SUFFIX_PATTERN = re.compile(rf"^(?P<name>.+?)\s+(?P<amount>{AMOUNT_TOKEN_PATTERN})(?P<unit>{UNIT_PATTERN})?$")
@@ -224,10 +229,10 @@ def parse_ingredients_text(ingredients_text: Optional[str]) -> List[Dict[str, Op
 
         parsed_items.append(
             {
-                "name": normalized_name,
+                "source_name": name,
                 "normalized_name": normalized_name,
-                "amount": _normalize_amount(amount),
-                "unit": unit,
+                "amount": _normalize_amount(amount, unit),
+                "unit": _normalize_unit(amount, unit),
                 "remark": remark,
             }
         )
@@ -253,7 +258,7 @@ def sync_recipe_ingredients(connection, recipe_id: int, ingredients_text: Option
         return
 
     for item in parsed_items:
-        ingredient_id = _get_or_create_ingredient(connection, item["name"], item["normalized_name"])
+        ingredient_id = _get_or_create_ingredient(connection, item["normalized_name"], item.get("source_name"))
         connection.execute(
             """
             INSERT INTO recipe_ingredients (
@@ -297,10 +302,10 @@ def sync_recipe_ingredients_from_items(connection, recipe_id: int, items: List[D
     normalized_items = _dedupe_ingredient_items(
         [
             {
-                "name": normalize_ingredient_name(item.get("name") or ""),
+                "source_name": item.get("name") or "",
                 "normalized_name": normalize_ingredient_name(item.get("name") or ""),
-                "amount": _normalize_amount(item.get("amount")),
-                "unit": item.get("unit"),
+                "amount": _normalize_amount(item.get("amount"), item.get("unit")),
+                "unit": _normalize_unit(item.get("amount"), item.get("unit")),
                 "remark": _normalize_remark(item.get("remark")),
             }
             for item in items
@@ -309,7 +314,7 @@ def sync_recipe_ingredients_from_items(connection, recipe_id: int, items: List[D
     )
 
     for item in normalized_items:
-        ingredient_id = _get_or_create_ingredient(connection, item["name"], item["normalized_name"])
+        ingredient_id = _get_or_create_ingredient(connection, item["normalized_name"], item.get("source_name"))
         connection.execute(
             """
             INSERT INTO recipe_ingredients (
@@ -335,30 +340,44 @@ def sync_recipe_ingredients_from_items(connection, recipe_id: int, items: List[D
     )
 
 
-def _get_or_create_ingredient(connection, name: str, normalized_name: str) -> int:
+def _get_or_create_ingredient(connection, normalized_name: str, alias_name: Optional[str] = None) -> int:
     row = connection.execute(
         """
         SELECT id
         FROM ingredients
         WHERE normalized_name = ?
-           OR name = ?
         ORDER BY id
         LIMIT 1
         """,
-        (normalized_name, name),
+        (normalized_name,),
     ).fetchone()
 
     if row is not None:
+        if alias_name and alias_name.strip() and alias_name.strip() != normalized_name:
+            _add_ingredient_alias(connection, row["id"], alias_name.strip(), "import")
         return row["id"]
 
     cursor = connection.execute(
         """
-        INSERT INTO ingredients (name, alias, normalized_name)
+        INSERT INTO ingredients (normalized_name)
+        VALUES (?)
+        """,
+        (normalized_name,),
+    )
+    ingredient_id = cursor.lastrowid
+    if alias_name and alias_name.strip() and alias_name.strip() != normalized_name:
+        _add_ingredient_alias(connection, ingredient_id, alias_name.strip(), "import")
+    return ingredient_id
+
+
+def _add_ingredient_alias(connection, ingredient_id: int, alias_name: str, source: str) -> None:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO ingredient_aliases (ingredient_id, alias_name, source)
         VALUES (?, ?, ?)
         """,
-        (normalized_name, name if normalized_name != name else None, normalized_name),
+        (ingredient_id, alias_name, source),
     )
-    return cursor.lastrowid
 
 
 def _split_ingredient_part(part: str) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
@@ -489,11 +508,17 @@ def _looks_like_ingredient_name(value: str) -> bool:
     return True
 
 
-def _normalize_amount(amount: Optional[str]) -> Optional[str]:
+def _normalize_amount(amount: Optional[str], unit: Optional[str] = None) -> Optional[str]:
     if not amount:
         return None
 
     cleaned = amount.strip()
+    clean_unit = (unit or "").strip()
+    if clean_unit:
+        match = UNIT_AMOUNT_PATTERN.match(cleaned)
+        if match and match.group("unit").lower() == clean_unit.lower():
+            cleaned = match.group("amount")
+
     combined_amount_map = {
         "一个": "1",
         "两个": "2",
@@ -524,6 +549,17 @@ def _normalize_amount(amount: Optional[str]) -> Optional[str]:
         "十": "10",
     }
     return amount_map.get(cleaned, cleaned)
+
+
+def _normalize_unit(amount: Optional[str], unit: Optional[str]) -> Optional[str]:
+    clean_unit = (unit or "").strip()
+    if clean_unit:
+        return clean_unit
+    clean_amount = (amount or "").strip()
+    match = UNIT_AMOUNT_PATTERN.match(clean_amount)
+    if match:
+        return match.group("unit")
+    return None
 
 
 def _normalize_remark(remark: Optional[str]) -> Optional[str]:

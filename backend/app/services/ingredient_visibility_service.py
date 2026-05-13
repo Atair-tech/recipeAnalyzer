@@ -441,7 +441,7 @@ def _classify_ingredient_visibility_all_deepseek(
     items_payload = [
         {
             "id": item["id"],
-            "text": item["normalized_name"] or item["name"],
+            "text": item["normalized_name"],
         }
         for item in ingredients
     ]
@@ -568,8 +568,6 @@ def _classify_ingredient_visibility_batch_local(
                 [
                     {
                         "id": item["id"],
-                        "name": item["name"],
-                        "alias": item["alias"],
                         "normalized_name": item["normalized_name"],
                     }
                     for item in ingredients
@@ -631,8 +629,6 @@ def _classify_ingredient_visibility_single_local(
             json.dumps(
                 {
                     "id": ingredient["id"],
-                    "name": ingredient["name"],
-                    "alias": ingredient["alias"],
                     "normalized_name": ingredient["normalized_name"],
                 },
                 ensure_ascii=False,
@@ -658,7 +654,7 @@ def _classify_ingredient_visibility_single_local(
             status="error",
             run_id=run_id,
             error_text=str(error),
-            meta={"ingredient_id": ingredient["id"], "ingredient_name": ingredient["name"], "provider": PROVIDER_OLLAMA},
+            meta={"ingredient_id": ingredient["id"], "ingredient_name": ingredient["normalized_name"], "provider": PROVIDER_OLLAMA},
         )
         raise
 
@@ -670,7 +666,7 @@ def _classify_ingredient_visibility_single_local(
         status="success",
         run_id=run_id,
         response_text=raw_content,
-        meta={"ingredient_id": ingredient["id"], "ingredient_name": ingredient["name"], "provider": PROVIDER_OLLAMA},
+        meta={"ingredient_id": ingredient["id"], "ingredient_name": ingredient["normalized_name"], "provider": PROVIDER_OLLAMA},
     )
 
     parsed = _extract_json_payload(raw_content)
@@ -685,7 +681,7 @@ def _load_run_inputs(run_id: int):
     with get_connection() as connection:
         ingredients = connection.execute(
             """
-            SELECT id, name, alias, normalized_name, is_visible
+            SELECT id, normalized_name, is_visible
             FROM ingredients
             ORDER BY id
             """
@@ -716,8 +712,6 @@ def _get_deepseek_api_key_source() -> Optional[str]:
 def _row_to_item(row: Any) -> Dict[str, Any]:
     item = {
         "id": row["id"],
-        "name": row["name"] or "",
-        "alias": row["alias"] or "",
         "normalized_name": row["normalized_name"] or "",
         "current_is_visible": row["is_visible"],
     }
@@ -830,15 +824,13 @@ def _build_filter_version(provider_name: str, actual_model: str) -> str:
 
 def _build_source_hash(row: Dict[str, Any]) -> str:
     payload = {
-        "name": row.get("name") or "",
-        "alias": row.get("alias") or "",
         "normalized_name": row.get("normalized_name") or "",
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _deterministic_visibility_result(ingredient: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    candidate = (ingredient.get("normalized_name") or ingredient.get("name") or "").strip()
+    candidate = (ingredient.get("normalized_name") or "").strip()
     compact = re.sub(r"\s+", "", candidate)
     if not compact:
         return {"is_visible": False, "reason": "empty ingredient entry", "raw_response": ""}
@@ -869,7 +861,7 @@ def _deterministic_visibility_result(ingredient: Dict[str, Any]) -> Optional[Dic
 
 
 def _hard_hide_visibility_item(ingredient: Dict[str, Any]) -> bool:
-    candidate = (ingredient.get("normalized_name") or ingredient.get("name") or "").strip()
+    candidate = (ingredient.get("normalized_name") or "").strip()
     compact = re.sub(r"\s+", "", candidate)
     if not compact:
         return True
@@ -933,7 +925,7 @@ def _hard_hide_visibility_item(ingredient: Dict[str, Any]) -> bool:
 
 
 def _hard_keep_visibility_item(ingredient: Dict[str, Any]) -> bool:
-    candidate = (ingredient.get("normalized_name") or ingredient.get("name") or "").strip()
+    candidate = (ingredient.get("normalized_name") or "").strip()
     compact = re.sub(r"\s+", "", candidate)
     option_tokens = _parse_option_tokens(compact)
     if option_tokens:

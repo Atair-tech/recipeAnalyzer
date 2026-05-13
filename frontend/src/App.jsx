@@ -14,6 +14,7 @@ import RecipeDetail from "./components/RecipeDetail";
 import RecipeEditor from "./components/RecipeEditor";
 import RecipeList from "./components/RecipeList";
 import Sidebar from "./components/Sidebar";
+import SystemSettings from "./components/SystemSettings";
 import TagManagement from "./components/TagManagement";
 import {
   acknowledgeBirthdaySurpriseEvent,
@@ -37,7 +38,8 @@ function StartupGate({ open, onOpen, onDisable }) {
   return (
     <div className={`startup-gate ${open ? "open" : ""}`} aria-hidden={open ? "true" : "false"}>
       <button type="button" className="startup-gate-core" onClick={onOpen}>
-        <img className="startup-gate-image" src="/resource/birthday-table.png" alt="" />
+        <img className="startup-gate-image startup-gate-image-primary" src="/resource/餐桌.png" alt="" />
+        <img className="startup-gate-image startup-gate-image-secondary" src="/resource/餐桌2.png" alt="" />
       </button>
       <button type="button" className="startup-gate-skip" onClick={onDisable}>
         以后不再显示
@@ -55,6 +57,7 @@ export default function App() {
       return true;
     }
   });
+  const [birthdayEventChecked, setBirthdayEventChecked] = useState(false);
   const [startupGateOpen, setStartupGateOpen] = useState(false);
   const [selectedSection, setSelectedSection] = useState("analytics");
   const [health, setHealth] = useState(null);
@@ -121,6 +124,8 @@ export default function App() {
           return;
         }
         if (event.pending && event.route === "birthday" && event.event_id) {
+          setStartupGateOpen(false);
+          setShowStartupGate(false);
           window.location.hash = "birthday";
           acknowledgeBirthdaySurpriseEvent(event.event_id).catch(() => {});
         }
@@ -128,6 +133,7 @@ export default function App() {
         // The desktop backend may still be starting; the next poll will retry.
       } finally {
         if (active) {
+          setBirthdayEventChecked(true);
           timerId = window.setTimeout(checkBirthdayEvent, 2000);
         }
       }
@@ -143,7 +149,8 @@ export default function App() {
     };
   }, []);
 
-  const startupGateVisible = showStartupGate && routeHash !== "#birthday";
+  const startupPreflightVisible = showStartupGate && !birthdayEventChecked && routeHash !== "#birthday";
+  const startupGateVisible = showStartupGate && birthdayEventChecked && routeHash !== "#birthday";
 
   function openStartupGate({ disableFuture = false } = {}) {
     if (startupGateOpen) {
@@ -157,7 +164,7 @@ export default function App() {
       }
     }
     setStartupGateOpen(true);
-    window.setTimeout(() => setShowStartupGate(false), 420);
+    window.setTimeout(() => setShowStartupGate(false), 1360);
   }
 
   const deferredSearch = useDeferredValue(search);
@@ -334,6 +341,7 @@ export default function App() {
           onDisable={() => openStartupGate({ disableFuture: true })}
         />
       ) : null}
+      {startupPreflightVisible ? <div className="startup-preflight" /> : null}
 
       <Sidebar
         health={health}
@@ -426,6 +434,8 @@ export default function App() {
         {selectedSection === "refineReview" ? <RefineReview /> : null}
 
         {selectedSection === "database" ? <DatabaseBrowser /> : null}
+
+        {selectedSection === "settings" ? <SystemSettings /> : null}
 
         {selectedSection === "aiLogs" ? <AiLogViewer /> : null}
 

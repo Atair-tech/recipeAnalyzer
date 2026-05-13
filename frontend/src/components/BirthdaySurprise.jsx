@@ -60,7 +60,7 @@ export default function BirthdaySurprise() {
             muted
             autoPlay
             playsInline
-            onEnded={openMainProgram}
+            onEnded={() => setPhase("done")}
           />
           {playBlocked ? (
             <button type="button" className="birthday-click-layer">

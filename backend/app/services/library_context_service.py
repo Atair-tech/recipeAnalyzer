@@ -72,12 +72,12 @@ def get_library_vocabulary_summary() -> Dict[str, Any]:
         visible_ingredients = _single_column_values(
             connection,
             """
-            SELECT COALESCE(i.normalized_name, i.name) AS value, COUNT(ri.recipe_id) AS usage_count
+            SELECT i.normalized_name AS value, COUNT(ri.recipe_id) AS usage_count
             FROM ingredients AS i
             LEFT JOIN recipe_ingredients AS ri ON ri.ingredient_id = i.id
             WHERE i.is_visible = 1
-              AND COALESCE(i.normalized_name, i.name) IS NOT NULL
-              AND TRIM(COALESCE(i.normalized_name, i.name)) <> ''
+              AND i.normalized_name IS NOT NULL
+              AND TRIM(i.normalized_name) <> ''
             GROUP BY value
             ORDER BY usage_count DESC, value ASC
             LIMIT ?

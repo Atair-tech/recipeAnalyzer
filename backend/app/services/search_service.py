@@ -332,12 +332,12 @@ def _load_known_values(connection) -> Dict[str, List[str]]:
     ).fetchall()
     ingredient_rows = connection.execute(
         """
-        SELECT DISTINCT COALESCE(normalized_name, name) AS ingredient_name
+        SELECT DISTINCT normalized_name AS ingredient_name
         FROM ingredients
-        WHERE COALESCE(normalized_name, name) IS NOT NULL
-          AND TRIM(COALESCE(normalized_name, name)) <> ''
+        WHERE normalized_name IS NOT NULL
+          AND TRIM(normalized_name) <> ''
           AND is_visible = 1
-          AND LENGTH(TRIM(COALESCE(normalized_name, name))) >= 2
+          AND LENGTH(TRIM(normalized_name)) >= 2
         ORDER BY ingredient_name
         """
     ).fetchall()
@@ -419,7 +419,7 @@ def _load_candidate_recipes(connection, candidate_ids: Optional[Set[int]]) -> Li
         """
         SELECT
             ri.recipe_id,
-            COALESCE(i.normalized_name, i.name) AS ingredient_name
+            i.normalized_name AS ingredient_name
         FROM recipe_ingredients AS ri
         INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
         WHERE i.is_visible = 1

@@ -3,14 +3,25 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
-from app.schemas.recipe import RecipeEditorCreatePayload, RecipeEditorRowPayload, RecipeUpdatePayload
+from app.schemas.recipe import (
+    RecipeEditorCreatePayload,
+    RecipeEditorRowPayload,
+    RecipeUpdatePayload,
+    TableEditorApplyPayload,
+    TableEditorRowsPayload,
+    TableEditorSqlPayload,
+)
 from app.services.excel_export_service import build_excel_bytes, normalize_filename
 from app.services.recipe_service import (
+    apply_table_editor_changes,
     create_recipe_editor_row,
+    execute_table_editor_sql,
     export_recipes_rows,
     get_recipe,
     get_recipe_editor_schema,
+    get_table_editor_schema,
     get_recipe_filters,
+    list_table_editor_rows,
     list_recipe_editor_rows,
     list_recipes,
     update_recipe,
@@ -97,6 +108,44 @@ def recipe_filters():
 @router.get("/recipes/editor/schema")
 def recipe_editor_schema():
     return get_recipe_editor_schema()
+
+
+@router.get("/recipes/editor/tables")
+def recipe_editor_tables():
+    return get_table_editor_schema()
+
+
+@router.post("/recipes/editor/table-rows")
+def recipe_editor_table_rows(payload: TableEditorRowsPayload):
+    try:
+        return list_table_editor_rows(
+            table=payload.table,
+            filters=payload.filters,
+            limit=payload.limit,
+            offset=payload.offset,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/recipes/editor/sql")
+def recipe_editor_sql(payload: TableEditorSqlPayload):
+    try:
+        return execute_table_editor_sql(payload.sql)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"SQL 执行失败：{error}") from error
+
+
+@router.post("/recipes/editor/apply")
+def recipe_editor_apply(payload: TableEditorApplyPayload):
+    try:
+        return apply_table_editor_changes(payload.table, payload.changes)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"写入更改失败：{error}") from error
 
 
 @router.get("/recipes/editor/rows")

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from app.db.database import get_connection
 from app.services.ai_log_service import create_ai_conversation_log
-from app.services.ingredient_service import normalize_ingredient_name, sync_recipe_ingredients_from_items
+from app.services.ingredient_service import parse_ingredients_text, normalize_ingredient_name, sync_recipe_ingredients_from_items
 from app.services.ollama_service import OLLAMA_DEFAULT_MODEL, _call_ollama_chat as _ollama_chat_impl
 from app.services.refine_hash_service import build_refinement_source_hash
 
@@ -82,6 +82,7 @@ BRAND_PREFIXES = (
 )
 GENERIC_PREFIXES = ("点缀用的", "搭配用的", "佐餐用的", "原版用的", "可选搭配", "搭配蔬菜")
 INGREDIENT_SEGMENTS = (
+    "小葱花",
     "葡萄叶",
     "鸡胸肉",
     "鸡腿肉",
@@ -94,6 +95,9 @@ INGREDIENT_SEGMENTS = (
     "莳萝",
     "海带",
     "裙带菜",
+    "花蛤",
+    "蛤蜊",
+    "料酒",
     "南瓜",
     "土豆",
     "红薯",
@@ -104,11 +108,32 @@ INGREDIENT_SEGMENTS = (
     "麻椒",
     "雪菜",
     "青菜",
+    "姜片",
+    "糖",
+)
+SECTION_LABELS = (
+    "蛤蜊水",
+    "汤底",
+    "淋面",
+    "腌料",
+    "酱汁",
+    "料汁",
+    "汤汁",
+    "主料",
+    "辅料",
+    "配料",
+    "配菜",
+    "调料",
+    "调味",
+    "香料",
+    "卤料",
 )
 AMOUNT_IN_NAME_PATTERN = re.compile(r"(?P<prefix>.*?)(?P<amount>\d+(?:\.\d+)?)(?P<unit>g|kg|ml|mL|L|l|克|千克|毫升|公升)$", re.I)
+REFINE_EXTRA_UNITS = {"tsp", "tbsp", "teaspoon", "tablespoon"}
 PACKAGE_HINT_PATTERN = re.compile(r"(半包|半袋|一包|一袋|半盒|一盒)$")
 FALLBACK_SPLIT_PATTERN = re.compile(r"[，,、；;]")
 FALLBACK_CHOICE_PATTERN = re.compile(r"(?:/|／|\\|or|OR|或)")
+SECTION_HEADING_PATTERN = re.compile(r"[【\[][^】\]]+[】\]]")
 
 _job_lock = threading.Lock()
 _job_state = {
@@ -285,7 +310,7 @@ def _has_suspicious_refined_ingredients(recipe_id: int) -> bool:
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT i.name, ri.amount, ri.unit
+            SELECT i.normalized_name AS name, ri.amount, ri.unit
             FROM recipe_ingredients AS ri
             INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
             WHERE ri.recipe_id = ?
@@ -304,6 +329,9 @@ def _has_suspicious_refined_ingredients(recipe_id: int) -> bool:
         if re.fullmatch(r"\d+(?:\.\d+)?(?:g|kg|ml|l|L|mL)?", name, flags=re.I):
             return True
         if "ingredient" in name.lower() or "词条" in name or "見" in name or "见" in name:
+            return True
+        repaired_name, _, _, _ = _repair_quantity_in_name(name, amount or None, unit or None, None)
+        if repaired_name != name:
             return True
         if amount and unit and amount.lower().endswith(unit.lower()):
             return True
@@ -566,7 +594,7 @@ def _load_recipe_snapshot(recipe_id: int) -> Dict[str, Any]:
         ).fetchone()
         ingredient_rows = connection.execute(
             """
-            SELECT i.name, ri.amount, ri.unit, ri.remark
+            SELECT i.normalized_name AS name, ri.amount, ri.unit, ri.remark
             FROM recipe_ingredients AS ri
             INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
             WHERE ri.recipe_id = ?
@@ -686,6 +714,11 @@ def _generate_refined_ingredients(
         ingredients = _sanitize_refined_ingredients(parsed.get("ingredients"))
     except Exception as error:
         parse_error = error
+    if ingredients:
+        ingredients = _merge_sanitized_ingredients(
+            ingredients,
+            _fallback_ingredients_from_declared_source(recipe),
+        )
     if not ingredients:
         ingredients = _fallback_ingredients_from_source(recipe)
     if not ingredients and (recipe["ingredients_text"] or recipe["ingredients"]):
@@ -727,6 +760,10 @@ def _normalize_optional_text(value: Any) -> Optional[str]:
 
 def _sanitize_refined_ingredients(value: Any) -> List[Dict[str, Optional[str]]]:
     normalized = _normalize_ingredient_items(value)
+    return _dedupe_sanitized_ingredients(normalized)
+
+
+def _dedupe_sanitized_ingredients(normalized: List[Dict[str, Optional[str]]]) -> List[Dict[str, Optional[str]]]:
     result: List[Dict[str, Optional[str]]] = []
     seen = set()
 
@@ -763,6 +800,32 @@ def _sanitize_refined_ingredients(value: Any) -> List[Dict[str, Optional[str]]]:
     return result
 
 
+def _merge_sanitized_ingredients(
+    primary: List[Dict[str, Optional[str]]],
+    secondary: List[Dict[str, Optional[str]]],
+) -> List[Dict[str, Optional[str]]]:
+    return _dedupe_sanitized_ingredients(primary + secondary)
+
+
+def _fallback_ingredients_from_declared_source(recipe: Dict[str, Any]) -> List[Dict[str, Optional[str]]]:
+    source_text = (recipe.get("ingredients_text") or "").strip()
+    if not source_text:
+        return []
+
+    parsed_items = parse_ingredients_text(_remove_section_headings(source_text))
+    candidates = [
+        {
+            "name": item.get("normalized_name") or item.get("source_name") or "",
+            "amount": item.get("amount"),
+            "unit": item.get("unit"),
+            "remark": item.get("remark"),
+        }
+        for item in parsed_items
+        if item.get("normalized_name")
+    ]
+    return _sanitize_refined_ingredients(candidates)
+
+
 def _fallback_ingredients_from_source(recipe: Dict[str, Any]) -> List[Dict[str, Optional[str]]]:
     text = "，".join(
         part
@@ -772,6 +835,7 @@ def _fallback_ingredients_from_source(recipe: Dict[str, Any]) -> List[Dict[str, 
         ]
         if part
     )
+    text = _remove_section_headings(text)
     if not text:
         return []
 
@@ -811,9 +875,65 @@ def _normalize_item_fields(
     candidate = re.sub(r"\s+", "", name or "")
     candidate = re.sub(r"[()（）\[\]【】]", "", candidate)
     candidate = _strip_known_prefixes(candidate)
+    candidate, amount, unit, remark = _repair_quantity_in_name(candidate, amount, unit, remark)
     candidate, amount, unit, remark = _extract_amount_from_name(candidate, amount, unit, remark)
     candidate = _extract_named_fragment(candidate)
+    candidate = _strip_section_labels(candidate)
     return candidate, amount, unit, remark
+
+
+def _repair_quantity_in_name(
+    text: str,
+    amount: Optional[str],
+    unit: Optional[str],
+    remark: Optional[str],
+) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
+    candidate = re.sub(r"\s+", "", text or "")
+    if not candidate or not any(char.isdigit() for char in candidate):
+        return text, amount, unit, remark
+
+    parsed_items = parse_ingredients_text(candidate)
+    if len(parsed_items) != 1:
+        return text, amount, unit, remark
+
+    parsed = parsed_items[0]
+    parsed_name = str(parsed.get("normalized_name") or "").strip()
+    if not parsed_name or parsed_name == candidate or any(char.isdigit() for char in parsed_name):
+        return text, amount, unit, remark
+    if _should_drop_refined_name(parsed_name):
+        return text, amount, unit, remark
+
+    parsed_amount = _normalize_optional_text(parsed.get("amount"))
+    parsed_unit = _normalize_optional_text(parsed.get("unit"))
+    parsed_remark = _normalize_optional_text(parsed.get("remark"))
+    parsed_unit, parsed_remark = _promote_unit_remark(parsed_unit, parsed_remark)
+    if not (parsed_amount or parsed_unit or parsed_remark):
+        return text, amount, unit, remark
+
+    existing_quantity = _format_quantity(amount, unit)
+    parsed_quantity = _format_quantity(parsed_amount, parsed_unit)
+    merged_remark = _merge_remarks(parsed_remark, remark)
+    if existing_quantity and existing_quantity != parsed_quantity:
+        merged_remark = _merge_remarks(existing_quantity, merged_remark)
+
+    return parsed_name, parsed_amount or amount, parsed_unit or unit, merged_remark
+
+
+def _promote_unit_remark(unit: Optional[str], remark: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    if unit or not remark:
+        return unit, remark
+    candidate = remark.strip()
+    if candidate.lower() in REFINE_EXTRA_UNITS:
+        return candidate, None
+    return unit, remark
+
+
+def _format_quantity(amount: Optional[str], unit: Optional[str]) -> Optional[str]:
+    clean_amount = _normalize_optional_text(amount)
+    clean_unit = _normalize_optional_text(unit)
+    if not clean_amount and not clean_unit:
+        return None
+    return f"{clean_amount or ''}{clean_unit or ''}" or None
 
 
 def _split_choice_name(
@@ -824,6 +944,7 @@ def _split_choice_name(
 ) -> List[tuple[str, Optional[str], Optional[str], Optional[str]]]:
     candidate = re.sub(r"\s+", "", name or "")
     extracted_name, optional_remark = _extract_optional_ingredient_name(candidate, remark)
+    extracted_name = _strip_section_labels(extracted_name)
     merged_remark = _merge_remarks(optional_remark, remark)
 
     if re.search(r"(?:/|／|\\|or|OR|或)", extracted_name):
@@ -857,6 +978,22 @@ def _strip_known_prefixes(text: str) -> str:
         if candidate.startswith(prefix) and len(candidate) > len(prefix):
             candidate = candidate[len(prefix) :]
             break
+    return candidate
+
+
+def _remove_section_headings(text: str) -> str:
+    return SECTION_HEADING_PATTERN.sub("，", text or "")
+
+
+def _strip_section_labels(text: str) -> str:
+    candidate = text or ""
+    changed = True
+    while changed:
+        changed = False
+        for label in SECTION_LABELS:
+            if label and label in candidate and candidate != label:
+                candidate = candidate.replace(label, "")
+                changed = True
     return candidate
 
 

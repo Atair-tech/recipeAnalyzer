@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Recipe Analyzer",
-  "version": "0.1.21",
+  "version": "0.1.27",
   "identifier": "com.atair.recipeanalyzer",
   "build": {
     "beforeDevCommand": "npm run frontend:dev",
@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.ico"
     ],
@@ -42,6 +43,17 @@
       "allowDowngrades": false,
       "nsis": {
         "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZGMDk3MTZDQUVBQzNEQTEKUldTaFBheXViSEVKLytjb2tUL01GbzdBR2Y4OVhNb09QZWt3OFZlbXdvRlhSZWZxRWY0ZExLT1QK",
+      "endpoints": [
+        "https://github.com/Atair-tech/recipeAnalyzer/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

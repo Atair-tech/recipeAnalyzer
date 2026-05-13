@@ -90,6 +90,10 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     ingredient_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(ingredients)").fetchall()
     }
+    _migrate_ingredients_table(connection, ingredient_columns)
+    ingredient_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(ingredients)").fetchall()
+    }
     if ingredient_columns and "is_visible" not in ingredient_columns:
         connection.execute("ALTER TABLE ingredients ADD COLUMN is_visible INTEGER NOT NULL DEFAULT 1")
 
@@ -180,7 +184,19 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_ingredients_visible
-        ON ingredients(is_visible, normalized_name, name)
+        ON ingredients(is_visible, normalized_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ingredient_aliases_identity
+        ON ingredient_aliases(ingredient_id, alias_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ingredient_aliases_alias_name
+        ON ingredient_aliases(alias_name)
         """
     )
     connection.execute(
@@ -319,6 +335,81 @@ def _drop_removed_recipe_columns(connection: sqlite3.Connection, existing_column
     )
     connection.execute("DROP TABLE recipes")
     connection.execute("ALTER TABLE recipes_new RENAME TO recipes")
+    connection.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_ingredients_table(connection: sqlite3.Connection, existing_columns: set[str]) -> None:
+    if not existing_columns:
+        return
+
+    needs_rebuild = "name" in existing_columns or "alias" in existing_columns or "normalized_name" not in existing_columns
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ingredient_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ingredient_id INTEGER NOT NULL,
+            alias_name TEXT NOT NULL,
+            source TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ingredient_aliases_identity
+        ON ingredient_aliases(ingredient_id, alias_name)
+        """
+    )
+    if not needs_rebuild:
+        return
+
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("DROP INDEX IF EXISTS idx_ingredients_visible")
+    connection.execute(
+        """
+        CREATE TABLE ingredients_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            normalized_name TEXT NOT NULL,
+            is_visible INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO ingredients_new (id, normalized_name, is_visible)
+        SELECT
+            id,
+            COALESCE(NULLIF(TRIM(normalized_name), ''), NULLIF(TRIM(name), ''), '') AS normalized_name,
+            COALESCE(is_visible, 1)
+        FROM ingredients
+        WHERE COALESCE(NULLIF(TRIM(normalized_name), ''), NULLIF(TRIM(name), '')) IS NOT NULL
+        """
+    )
+    if "name" in existing_columns:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO ingredient_aliases (ingredient_id, alias_name, source)
+            SELECT id, TRIM(name), 'legacy_name'
+            FROM ingredients
+            WHERE name IS NOT NULL
+              AND TRIM(name) <> ''
+              AND TRIM(name) <> COALESCE(NULLIF(TRIM(normalized_name), ''), TRIM(name))
+            """
+        )
+    if "alias" in existing_columns:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO ingredient_aliases (ingredient_id, alias_name, source)
+            SELECT id, TRIM(alias), 'legacy_alias'
+            FROM ingredients
+            WHERE alias IS NOT NULL
+              AND TRIM(alias) <> ''
+              AND TRIM(alias) <> COALESCE(NULLIF(TRIM(normalized_name), ''), TRIM(name), '')
+            """
+        )
+    connection.execute("DROP TABLE ingredients")
+    connection.execute("ALTER TABLE ingredients_new RENAME TO ingredients")
     connection.execute("PRAGMA foreign_keys = ON")
 
 

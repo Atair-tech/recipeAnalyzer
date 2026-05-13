@@ -104,7 +104,7 @@ def _load_recipe_snapshot(connection, recipe_id: int) -> Optional[Dict[str, Any]
     ).fetchall()
     ingredient_rows = connection.execute(
         """
-        SELECT COALESCE(i.normalized_name, i.name) AS ingredient_name
+        SELECT i.normalized_name AS ingredient_name
         FROM recipe_ingredients AS ri
         INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
         WHERE ri.recipe_id = ?
@@ -211,7 +211,7 @@ def _similar_recipe_suggestions(connection, recipe: Dict[str, Any]) -> List[Dict
             FROM recipe_ingredients AS ri
             INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
             WHERE ri.recipe_id <> ?
-              AND COALESCE(i.normalized_name, i.name) IN ({placeholders})
+              AND i.normalized_name IN ({placeholders})
             GROUP BY ri.recipe_id
             """.format(placeholders=", ".join("?" for _ in recipe_ingredients)),
             [recipe["id"], *recipe_ingredients],

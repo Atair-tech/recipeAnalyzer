@@ -25,9 +25,9 @@ BIRTHDAY_TARGETS = [
     ("20260509_2000", datetime(2026, 5, 9, 20, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")), False),
     ("20260509_2010", datetime(2026, 5, 9, 20, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")), False),
     ("20260509_2020", datetime(2026, 5, 9, 20, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")), False),
+    ("20260509_2130", datetime(2026, 5, 9, 21, 30, 0, tzinfo=ZoneInfo("Asia/Shanghai")), False),
+    ("20260509_2200", datetime(2026, 5, 9, 22, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")), False),
     ("20260510_0000", datetime(2026, 5, 10, 0, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")), True),
-    ("20260510_0930", datetime(2026, 5, 10, 9, 30, 0, tzinfo=ZoneInfo("Asia/Shanghai")), False),
-    ("20260510_1000", datetime(2026, 5, 10, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")), False),
 ]
 BIRTHDAY_CATCH_UP_WINDOW = timedelta(hours=12)
 BIRTHDAY_TEST_GRACE = timedelta(seconds=20)

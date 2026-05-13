@@ -1,6 +1,6 @@
 [package]
 name = "recipe-analyzer"
-version = "0.1.21"
+version = "0.1.27"
 description = "Local recipe library desktop shell"
 authors = ["Atair-tech"]
 edition = "2021"
@@ -13,5 +13,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+serde_json = "1"
 tauri = { version = "2", features = [] }
+tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"

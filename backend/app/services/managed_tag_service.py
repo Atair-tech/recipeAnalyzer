@@ -680,7 +680,7 @@ def _load_recipe_snapshot(recipe_id: int) -> Dict[str, Any]:
         ).fetchone()
         ingredient_rows = connection.execute(
             """
-            SELECT COALESCE(i.normalized_name, i.name) AS ingredient_name
+            SELECT i.normalized_name AS ingredient_name
             FROM recipe_ingredients AS ri
             INNER JOIN ingredients AS i ON i.id = ri.ingredient_id
             WHERE ri.recipe_id = ?

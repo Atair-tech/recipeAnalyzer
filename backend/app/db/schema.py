@@ -30,10 +30,18 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS ingredients (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        alias TEXT,
-        normalized_name TEXT,
+        normalized_name TEXT NOT NULL,
         is_visible INTEGER NOT NULL DEFAULT 1
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ingredient_aliases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ingredient_id INTEGER NOT NULL,
+        alias_name TEXT NOT NULL,
+        source TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE
     );
     """,
     """

@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 function isManagementSection(sectionKey) {
-  return ["tagging", "imports", "ingredientAnalysis", "refineReview", "pairing", "database", "aiLogs"].includes(sectionKey);
+  return ["tagging", "imports", "ingredientAnalysis", "refineReview", "pairing", "database", "settings", "aiLogs"].includes(sectionKey);
 }
 
 export default function Sidebar({ selectedSection, onSelectSection }) {
@@ -14,13 +14,14 @@ export default function Sidebar({ selectedSection, onSelectSection }) {
   ];
 
   const managementSections = [
-    { key: "tagging", label: "标签管理" },
-    { key: "imports", label: "导入 Excel" },
-    { key: "ingredientAnalysis", label: "AI 分析食材" },
-    { key: "pairing", label: "菜谱配对" },
-    { key: "database", label: "查看数据库" },
-    { key: "aiLogs", label: "AI 对话记录" },
-    { key: "refineReview", label: "食材审查" }
+    { key: "tagging", label: "\u6807\u7b7e\u7ba1\u7406" },
+    { key: "imports", label: "\u5bfc\u5165 Excel" },
+    { key: "ingredientAnalysis", label: "AI \u5206\u6790\u98df\u6750" },
+    { key: "pairing", label: "\u83dc\u8c31\u914d\u5bf9" },
+    { key: "database", label: "\u67e5\u770b\u6570\u636e\u5e93" },
+    { key: "settings", label: "\u7cfb\u7edf\u8bbe\u7f6e" },
+    { key: "aiLogs", label: "AI \u5bf9\u8bdd\u8bb0\u5f55" },
+    { key: "refineReview", label: "\u98df\u6750\u5ba1\u67e5" }
   ];
 
   return (
@@ -60,7 +61,7 @@ export default function Sidebar({ selectedSection, onSelectSection }) {
             aria-expanded={managementExpanded}
           >
             <span className="nav-group-title">管理</span>
-            <span className="nav-group-arrow">{managementExpanded ? "▾" : "▸"}</span>
+            <span className="nav-group-arrow">{managementExpanded ? "▴" : "▾"}</span>
           </button>
 
           {managementExpanded ? (
