@@ -765,6 +765,32 @@ button {
   color: var(--muted);
 }
 
+.settings-proxy-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  min-width: min(620px, 58vw);
+}
+
+.settings-proxy-field span,
+.settings-update-help {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.settings-proxy-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 250, 242, 0.82);
+  color: var(--text);
+}
+
+.settings-update-help {
+  margin-top: 8px !important;
+}
+
 .settings-update-detail {
   display: grid;
   gap: 12px;
