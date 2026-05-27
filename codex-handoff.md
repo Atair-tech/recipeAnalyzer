@@ -803,12 +803,21 @@ codex-handoff.md
 
 1. Read `AGENTS.md`.
 2. Read this file.
-3. Ask whether the latest installer with enhanced logging has been tested on the target computer.
-4. If tested, inspect the target machine's `backend.log`.
-5. If not tested, have the user install:
+3. Confirm whether `0.1.29` has been manually installed and whether the manual updater was tested from that version.
+4. If updater still fails, use the new System Settings diagnostics:
+   - check whether `latest.json` preflight succeeds;
+   - check whether the installer URL is shown;
+   - check whether the proxy field is set to the actual Clash HTTP proxy, commonly `http://127.0.0.1:7890`;
+   - check Clash connections for `github.com`, `release-assets.githubusercontent.com`, or related GitHub asset hosts during download.
+5. If the old `0.1.27` install cannot auto-update, manually install:
 
 ```text
-src-tauri\target\release\bundle\nsis\Recipe Analyzer_0.1.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\Recipe Analyzer_0.1.29_x64-setup.exe
 ```
 
-6. Continue packaging debug from the actual log content.
+6. Keep `data\birthday_surprise_2026.done` local/uncommitted. It is a runtime state file and should not be pushed.
+7. Current latest pushed commit is:
+
+```text
+0f3a523 Improve updater download diagnostics
+```
