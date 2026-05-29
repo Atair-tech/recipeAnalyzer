@@ -10,6 +10,8 @@ from app.schemas.recipe import (
     TableEditorApplyPayload,
     TableEditorRowsPayload,
     TableEditorSqlPayload,
+    UserViewFilterValuesPayload,
+    UserViewRowsPayload,
 )
 from app.services.excel_export_service import build_excel_bytes, normalize_filename
 from app.services.recipe_service import (
@@ -21,9 +23,12 @@ from app.services.recipe_service import (
     get_recipe_editor_schema,
     get_table_editor_schema,
     get_recipe_filters,
+    get_user_view_editor_schema,
+    list_user_view_filter_values,
     list_table_editor_rows,
     list_recipe_editor_rows,
     list_recipes,
+    list_user_view_editor_rows,
     update_recipe,
     update_recipe_editor_row,
 )
@@ -123,6 +128,40 @@ def recipe_editor_table_rows(payload: TableEditorRowsPayload):
             filters=payload.filters,
             limit=payload.limit,
             offset=payload.offset,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/recipes/editor/user-views")
+def recipe_editor_user_views():
+    return get_user_view_editor_schema()
+
+
+@router.post("/recipes/editor/user-view-rows")
+def recipe_editor_user_view_rows(payload: UserViewRowsPayload):
+    try:
+        return list_user_view_editor_rows(
+            view=payload.view,
+            filters=payload.filters,
+            limit=payload.limit,
+            offset=payload.offset,
+            sort_column=payload.sort_column,
+            sort_direction=payload.sort_direction,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/recipes/editor/user-view-filter-values")
+def recipe_editor_user_view_filter_values(payload: UserViewFilterValuesPayload):
+    try:
+        return list_user_view_filter_values(
+            view=payload.view,
+            column=payload.column,
+            filters=payload.filters,
+            search=payload.search,
+            limit=payload.limit,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error

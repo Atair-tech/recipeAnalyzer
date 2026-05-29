@@ -1769,6 +1769,15 @@ button {
   border-left: 1px solid #bcbcbc;
 }
 
+.user-view-description {
+  min-width: 220px;
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
 .editor-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1923,6 +1932,10 @@ button {
   color: #111;
 }
 
+.user-view-table {
+  min-width: 0;
+}
+
 .editor-table th,
 .editor-table td {
   padding: 2px 4px;
@@ -1990,7 +2003,7 @@ button {
 
 .editor-action-column {
   position: sticky;
-  left: 44px;
+  left: 48px;
   z-index: 3;
   width: 72px !important;
   min-width: 72px;
@@ -2002,9 +2015,9 @@ button {
   position: sticky;
   left: 0;
   z-index: 3;
-  width: 44px !important;
-  min-width: 44px;
-  max-width: 44px !important;
+  width: 48px !important;
+  min-width: 48px;
+  max-width: 48px !important;
   background: #f7f7f7;
   text-align: right;
   color: #333;
@@ -2020,11 +2033,27 @@ button {
 
 .editor-readonly-cell {
   display: block;
+  width: 100%;
   min-height: 20px;
   color: #333;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.user-view-cell {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.user-view-cell:hover {
+  color: #145f4a;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .editor-dirty-row td {
@@ -2092,6 +2121,164 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
   padding-right: 8px;
+}
+
+.user-filter-column-title {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 10px;
+}
+
+.user-filter-column-title span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-sort-indicator {
+  flex: 0 0 auto;
+  color: #145f4a;
+  font-weight: 700;
+}
+
+.user-filter-trigger {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 17px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid #9fa7ad;
+  border-radius: 0;
+  background: linear-gradient(#fff, #d9dfe3);
+  color: #333;
+  cursor: pointer;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.user-cell-popover {
+  position: fixed;
+  z-index: 130;
+  width: min(440px, calc(100vw - 16px));
+  max-height: min(360px, calc(100vh - 20px));
+  border: 1px solid #8f969c;
+  background: #fff;
+  color: #111;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+  overflow: hidden;
+}
+
+.user-cell-popover header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #d0d0d0;
+  background: #f0f0f0;
+}
+
+.user-cell-popover-content {
+  max-height: 310px;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.user-filtered-column {
+  background: #e6f2ff !important;
+}
+
+.user-filter-popover {
+  position: fixed;
+  z-index: 120;
+  display: grid;
+  gap: 8px;
+  width: 324px;
+  max-width: calc(100vw - 16px);
+  padding: 10px;
+  border: 1px solid #9aa3aa;
+  background: #f3f3f3;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+  color: #111;
+  font-size: 0.86rem;
+}
+
+.user-filter-menu-row {
+  display: flex;
+  gap: 8px;
+}
+
+.user-filter-menu-row.muted {
+  opacity: 0.62;
+}
+
+.user-filter-menu-command {
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #111;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.user-filter-menu-command:hover,
+.user-filter-menu-command.active {
+  border-color: #9da4aa;
+  background: #fff;
+}
+
+.user-filter-search {
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 6px;
+  border: 2px solid #111;
+  border-radius: 0;
+  background: #fff;
+  color: #111;
+  font: inherit;
+}
+
+.user-filter-values {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  max-height: 220px;
+  padding: 4px;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  overflow: auto;
+}
+
+.user-filter-value {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  white-space: nowrap;
+}
+
+.user-filter-value span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-filter-loading {
+  padding: 8px 4px;
+  color: #555;
+}
+
+.user-filter-actions {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .db-column-type {

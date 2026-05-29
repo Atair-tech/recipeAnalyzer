@@ -70,6 +70,104 @@ TABLE_EDITOR_LABELS = {
 
 SQL_EDITOR_BLOCKED_PREFIXES = ("attach", "detach")
 
+USER_VIEW_DEFINITIONS = {
+    "recipes": {
+        "label": "菜谱阅览",
+        "description": "按用户阅览字段展示菜谱，包含原始 Excel 文本和参考标签/食材。",
+        "order_by": '"记录类型", "主题", "分组", "菜名"',
+        "columns": [
+            {"name": "菜名", "type": "TEXT"},
+            {"name": "主题", "type": "TEXT"},
+            {"name": "分组", "type": "TEXT"},
+            {"name": "大地域", "type": "TEXT"},
+            {"name": "细分地域", "type": "TEXT"},
+            {"name": "食材", "type": "TEXT"},
+            {"name": "调料", "type": "TEXT"},
+            {"name": "做法与要点", "type": "TEXT"},
+            {"name": "来源/修订备注", "type": "TEXT"},
+            {"name": "最后记录日期", "type": "TEXT"},
+            {"name": "BMD", "type": "INTEGER"},
+            {"name": "CC", "type": "INTEGER"},
+            {"name": "自动标签（参考）", "type": "TEXT"},
+            {"name": "标准食材（参考）", "type": "TEXT"},
+            {"name": "记录类型", "type": "TEXT"},
+            {"name": "待办状态", "type": "TEXT"},
+        ],
+        "sql": """
+            SELECT
+                r.name AS "菜名",
+                COALESCE(r.library_section, '') AS "主题",
+                COALESCE(r.section_name, '') AS "分组",
+                COALESCE(r.cuisine, '') AS "大地域",
+                COALESCE(r.sub_cuisine, '') AS "细分地域",
+                COALESCE(r.ingredients_text, '') AS "食材",
+                COALESCE(r.seasonings_text, '') AS "调料",
+                COALESCE(r.steps_text, '') AS "做法与要点",
+                COALESCE(r.source_reference, '') AS "来源/修订备注",
+                COALESCE(r.last_reviewed_on, '') AS "最后记录日期",
+                COALESCE(r.bmd_flag, 0) AS "BMD",
+                COALESCE(r.cc_flag, 0) AS "CC",
+                COALESCE(GROUP_CONCAT(DISTINCT mt.name), '') AS "自动标签（参考）",
+                COALESCE(GROUP_CONCAT(DISTINCT i.normalized_name), '') AS "标准食材（参考）",
+                CASE r.record_kind
+                    WHEN 'recipe' THEN '正式菜谱'
+                    WHEN 'backlog' THEN '待办条目'
+                    ELSE COALESCE(r.record_kind, '')
+                END AS "记录类型",
+                COALESCE(r.backlog_status, '') AS "待办状态"
+            FROM recipes AS r
+            LEFT JOIN recipe_managed_tags AS rmt ON rmt.recipe_id = r.id
+            LEFT JOIN managed_tags AS mt ON mt.id = rmt.managed_tag_id
+            LEFT JOIN recipe_ingredients AS ri ON ri.recipe_id = r.id
+            LEFT JOIN ingredients AS i ON i.id = ri.ingredient_id AND i.is_visible = 1
+            GROUP BY r.id
+        """,
+    },
+    "ingredients": {
+        "label": "标准食材索引",
+        "description": "按标准食材查看关联菜谱数量和已维护别名。",
+        "order_by": '"关联菜谱数" DESC, "标准食材"',
+        "columns": [
+            {"name": "标准食材", "type": "TEXT"},
+            {"name": "可见", "type": "INTEGER"},
+            {"name": "关联菜谱数", "type": "INTEGER"},
+            {"name": "别名", "type": "TEXT"},
+        ],
+        "sql": """
+            SELECT
+                i.normalized_name AS "标准食材",
+                COALESCE(i.is_visible, 0) AS "可见",
+                COUNT(DISTINCT ri.recipe_id) AS "关联菜谱数",
+                COALESCE(GROUP_CONCAT(DISTINCT ia.alias_name), '') AS "别名"
+            FROM ingredients AS i
+            LEFT JOIN recipe_ingredients AS ri ON ri.ingredient_id = i.id
+            LEFT JOIN ingredient_aliases AS ia ON ia.ingredient_id = i.id
+            GROUP BY i.id
+        """,
+    },
+    "managed_tags": {
+        "label": "自动标签索引",
+        "description": "按自动标签查看说明、可见性和关联菜谱数量。",
+        "order_by": '"关联菜谱数" DESC, "标签"',
+        "columns": [
+            {"name": "标签", "type": "TEXT"},
+            {"name": "说明", "type": "TEXT"},
+            {"name": "可见", "type": "INTEGER"},
+            {"name": "关联菜谱数", "type": "INTEGER"},
+        ],
+        "sql": """
+            SELECT
+                mt.name AS "标签",
+                COALESCE(mt.description, '') AS "说明",
+                COALESCE(mt.is_active, 0) AS "可见",
+                COUNT(DISTINCT rmt.recipe_id) AS "关联菜谱数"
+            FROM managed_tags AS mt
+            LEFT JOIN recipe_managed_tags AS rmt ON rmt.managed_tag_id = mt.id
+            GROUP BY mt.id
+        """,
+    },
+}
+
 EDITABLE_RECIPE_COLUMNS = {
     "name",
     "record_kind",
@@ -536,7 +634,7 @@ def list_table_editor_rows(table: str, filters: Dict[str, Any], limit: int = 100
 
     columns = table_info["columns"]
     column_names = [column["name"] for column in columns]
-    where_sql, params = _build_table_editor_filters(filters, column_names)
+    where_sql, params = _build_table_editor_filters(filters, column_names, list_match_mode="contains")
     order_sql = _build_table_editor_order(columns)
     safe_limit = max(1, min(int(limit or 100), 500))
     safe_offset = max(0, int(offset or 0))
@@ -565,6 +663,133 @@ def list_table_editor_rows(table: str, filters: Dict[str, Any], limit: int = 100
         "total": total,
         "limit": safe_limit,
         "offset": safe_offset,
+    }
+
+
+def get_user_view_editor_schema() -> Dict[str, Any]:
+    with get_connection() as connection:
+        views = []
+        for view_name, definition in USER_VIEW_DEFINITIONS.items():
+            total = connection.execute(
+                f'SELECT COUNT(*) FROM ({definition["sql"]}) AS user_view'
+            ).fetchone()[0]
+            views.append(
+                {
+                    "name": view_name,
+                    "label": definition["label"],
+                    "description": definition.get("description", ""),
+                    "row_count": total,
+                    "columns": definition["columns"],
+                }
+            )
+
+    return {
+        "views": views,
+        "default_view": "recipes",
+    }
+
+
+def list_user_view_editor_rows(
+    view: str,
+    filters: Dict[str, Any],
+    limit: int = 100,
+    offset: int = 0,
+    sort_column: Optional[str] = None,
+    sort_direction: Optional[str] = None,
+) -> Dict[str, Any]:
+    definition = USER_VIEW_DEFINITIONS.get(view)
+    if definition is None:
+        raise ValueError("不支持阅览该视图")
+
+    columns = definition["columns"]
+    column_names = [column["name"] for column in columns]
+    where_sql, params = _build_table_editor_filters(filters, column_names)
+    safe_limit = max(1, min(int(limit or 100), 500))
+    safe_offset = max(0, int(offset or 0))
+    if sort_column:
+        if sort_column not in column_names:
+            raise ValueError("不支持按该字段排序")
+        direction = "DESC" if str(sort_direction or "").lower() == "desc" else "ASC"
+        sort_column_info = next((column for column in columns if column["name"] == sort_column), {})
+        sort_type = str(sort_column_info.get("type") or "").upper()
+        if "INT" in sort_type or "REAL" in sort_type or "NUM" in sort_type:
+            order_sql = f'ORDER BY CAST("{sort_column}" AS REAL) {direction}, "{sort_column}" COLLATE NOCASE {direction}'
+        else:
+            order_sql = f'ORDER BY "{sort_column}" COLLATE NOCASE {direction}'
+    else:
+        order_sql = f'ORDER BY {definition["order_by"]}' if definition.get("order_by") else ""
+
+    with get_connection() as connection:
+        total = connection.execute(
+            f'SELECT COUNT(*) FROM ({definition["sql"]}) AS user_view {where_sql}',
+            params,
+        ).fetchone()[0]
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM ({definition["sql"]}) AS user_view
+            {where_sql}
+            {order_sql}
+            LIMIT ? OFFSET ?
+            """,
+            [*params, safe_limit, safe_offset],
+        ).fetchall()
+
+    return {
+        "view": view,
+        "columns": columns,
+        "items": [_serialize_table_editor_row(row, column_names) for row in rows],
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "sort_column": sort_column or "",
+        "sort_direction": "desc" if str(sort_direction or "").lower() == "desc" else ("asc" if sort_column else ""),
+    }
+
+
+def list_user_view_filter_values(
+    view: str,
+    column: str,
+    filters: Dict[str, Any],
+    search: Optional[str] = None,
+    limit: int = 5000,
+) -> Dict[str, Any]:
+    definition = USER_VIEW_DEFINITIONS.get(view)
+    if definition is None:
+        raise ValueError("不支持阅览该视图")
+
+    column_names = [item["name"] for item in definition["columns"]]
+    if column not in column_names:
+        raise ValueError("不支持筛选该字段")
+
+    other_filters = {key: value for key, value in (filters or {}).items() if key != column}
+    where_sql, params = _build_table_editor_filters(other_filters, column_names)
+    clauses = [where_sql[6:]] if where_sql.startswith("WHERE ") else []
+    search_text = (search or "").strip()
+    if search_text:
+        clauses.append(f'CAST("{column}" AS TEXT) LIKE ?')
+        params.append(f"%{search_text}%")
+
+    final_where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    safe_limit = max(1, min(int(limit or 5000), 5000))
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT DISTINCT COALESCE(CAST("{column}" AS TEXT), '') AS value
+            FROM ({definition["sql"]}) AS user_view
+            {final_where_sql}
+            ORDER BY value COLLATE NOCASE
+            LIMIT ?
+            """,
+            [*params, safe_limit],
+        ).fetchall()
+
+    return {
+        "view": view,
+        "column": column,
+        "values": [row["value"] for row in rows],
+        "limit": safe_limit,
     }
 
 
@@ -1156,7 +1381,7 @@ def _get_table_editor_columns(connection, table_name: str) -> List[Dict[str, Any
     ]
 
 
-def _build_table_editor_filters(filters: Dict[str, Any], column_names: List[str]) -> Tuple[str, List[Any]]:
+def _build_table_editor_filters(filters: Dict[str, Any], column_names: List[str], list_match_mode: str = "exact") -> Tuple[str, List[Any]]:
     clauses: List[str] = []
     params: List[Any] = []
     allowed_columns = set(column_names)
@@ -1164,6 +1389,22 @@ def _build_table_editor_filters(filters: Dict[str, Any], column_names: List[str]
     for column_name in column_names:
         raw_value = filters.get(column_name)
         if raw_value is None:
+            continue
+        if isinstance(raw_value, list):
+            selected_values = [str(value) for value in raw_value]
+            if not selected_values:
+                clauses.append("1 = 0")
+                continue
+            if list_match_mode == "contains":
+                value_clauses = []
+                for value in selected_values:
+                    value_clauses.append(f'COALESCE(CAST("{column_name}" AS TEXT), \'\') LIKE ?')
+                    params.append(f"%{value}%")
+                clauses.append("(" + " OR ".join(value_clauses) + ")")
+            else:
+                placeholders = ", ".join("?" for _ in selected_values)
+                clauses.append(f'COALESCE(CAST("{column_name}" AS TEXT), \'\') IN ({placeholders})')
+                params.extend(selected_values)
             continue
         filter_value = str(raw_value).strip()
         if not filter_value:

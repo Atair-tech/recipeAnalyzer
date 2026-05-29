@@ -470,6 +470,10 @@ export function fetchRecipeEditorTables() {
   return request("/recipes/editor/tables");
 }
 
+export function fetchRecipeEditorUserViews() {
+  return request("/recipes/editor/user-views");
+}
+
 export function fetchRecipeEditorTableRows({ table, filters = {}, limit = 100, offset = 0 }) {
   return request("/recipes/editor/table-rows", {
     method: "POST",
@@ -477,6 +481,33 @@ export function fetchRecipeEditorTableRows({ table, filters = {}, limit = 100, o
       "Content-Type": "application/json"
     },
     body: JSON.stringify({ table, filters, limit, offset })
+  });
+}
+
+export function fetchRecipeEditorUserViewRows({ view, filters = {}, limit = 100, offset = 0, sortColumn = "", sortDirection = "" }) {
+  return request("/recipes/editor/user-view-rows", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      view,
+      filters,
+      limit,
+      offset,
+      sort_column: sortColumn || null,
+      sort_direction: sortDirection || null
+    })
+  });
+}
+
+export function fetchRecipeEditorUserViewFilterValues({ view, column, filters = {}, search = "", limit = 5000 }) {
+  return request("/recipes/editor/user-view-filter-values", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ view, column, filters, search, limit })
   });
 }
 

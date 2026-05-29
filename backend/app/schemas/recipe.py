@@ -105,6 +105,23 @@ class TableEditorRowsPayload(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+class UserViewRowsPayload(BaseModel):
+    view: str = Field(min_length=1)
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+    sort_column: Optional[str] = None
+    sort_direction: Optional[str] = None
+
+
+class UserViewFilterValuesPayload(BaseModel):
+    view: str = Field(min_length=1)
+    column: str = Field(min_length=1)
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    search: Optional[str] = None
+    limit: int = Field(default=5000, ge=1, le=5000)
+
+
 class TableEditorSqlPayload(BaseModel):
     sql: str = Field(min_length=1)
 
